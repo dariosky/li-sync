@@ -4,6 +4,7 @@ import asyncio
 import difflib
 import platform
 import re
+import shutil
 import subprocess
 import tempfile
 import unicodedata
@@ -677,10 +678,11 @@ class CommandsModal(ModalScreen[str | None]):
         ("o", "open_selected"),
         ("D", "delete_selected_both"),
         ("F", "diff_selected"),
+        ("P", "copy_selected_path"),
+        ("V", "view_plan"),
         ("I", "add_to_dropboxignore"),
         ("C", "clear_plan"),
         ("M", "apply_all_metadata_suggestions"),
-        ("P", "view_plan"),
     ]
 
     def __init__(self) -> None:
@@ -694,10 +696,11 @@ class CommandsModal(ModalScreen[str | None]):
             "o": "open",
             "D": "delete file/folder both sides",
             "F": "diff",
+            "P": "copy path",
+            "V": "view plan",
             "I": "add ignore rule",
             "C": "clear plan",
             "M": "add all meta suggestions",
-            "P": "view plan",
         }
         for idx, (key, _action) in enumerate(self.COMMANDS):
             pointer = ">" if idx == self.selected_index else " "
@@ -1040,7 +1043,8 @@ class ReviewApp(App[None]):
         Binding("o", "open_selected", "Open", show=False),
         Binding("D", "delete_selected_both", "Delete Both", show=False),
         Binding("F", "diff_selected", "Diff", show=False),
-        Binding("P", "view_plan", "View Plan", show=False),
+        Binding("P", "copy_selected_path", "Copy Path", show=False),
+        Binding("V", "view_plan", "View Plan", show=False),
         Binding("C", "clear_plan", "Clear Plan", show=False),
         Binding("M", "apply_all_metadata_suggestions", "Meta Suggestions", show=False),
         Binding("l", "apply_left_wins", "Left Wins"),
@@ -1229,7 +1233,8 @@ class ReviewApp(App[None]):
                 Binding("o", "open_selected", "Open", show=False),
                 Binding("D", "delete_selected_both", "Delete Both", show=False),
                 Binding("F", "diff_selected", "Diff", show=False),
-                Binding("P", "view_plan", "View Plan", show=False),
+                Binding("P", "copy_selected_path", "Copy Path", show=False),
+                Binding("V", "view_plan", "View Plan", show=False),
                 Binding("C", "clear_plan", "Clear Plan", show=False),
                 Binding(
                     "M",
@@ -1873,6 +1878,50 @@ class ReviewApp(App[None]):
     def action_view_plan(self) -> None:
         plan_ops = build_plan_operations(self.diffs, self.action_overrides)
         self.push_screen(PlanTreeModal(plan_ops))
+
+    def _copy_text_to_clipboard(self, text: str) -> None:
+        system = platform.system()
+        cmd: list[str] | None = None
+        if system == "Darwin":
+            cmd = ["pbcopy"]
+        elif system == "Windows":
+            cmd = ["clip"]
+        else:
+            if shutil.which("wl-copy"):
+                cmd = ["wl-copy"]
+            elif shutil.which("xclip"):
+                cmd = ["xclip", "-selection", "clipboard"]
+            elif shutil.which("xsel"):
+                cmd = ["xsel", "--clipboard", "--input"]
+        if cmd is None:
+            raise RuntimeError("No clipboard utility found.")
+        subprocess.run(
+            cmd,
+            input=text,
+            text=True,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def action_copy_selected_path(self) -> None:
+        selected = self._selected_node()
+        if selected is None:
+            self._notify_message(
+                "Select a file or folder to copy path.", severity="warning"
+            )
+            return
+        _kind, relpath = selected
+        if relpath == ".":
+            self._notify_message("Cannot copy root path.", severity="warning")
+            return
+        try:
+            self._copy_text_to_clipboard(relpath)
+        except Exception as exc:  # noqa: BLE001
+            self._notify_message(f"Copy path failed: {exc}", severity="error")
+            return
+        self.status_message = f"Copied path: {relpath}"
+        self._update_plan_panel()
 
     def _delete_ops_for_selected(self) -> tuple[str, list[PlanOperation]]:
         selected = self._selected_node()

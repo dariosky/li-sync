@@ -99,7 +99,17 @@ def _remote_state_db_path(remote_root: str) -> str:
 def _default_command(ctx: typer.Context) -> None:
     """Run `scan` when no subcommand is provided."""
     if ctx.invoked_subcommand is None:
-        ctx.invoke(scan)
+        ctx.invoke(
+            scan,
+            local_root=DEFAULT_LOCAL_ROOT,
+            remote_host=DEFAULT_REMOTE_HOST,
+            remote_user=DEFAULT_REMOTE_USER,
+            remote_port=DEFAULT_REMOTE_PORT,
+            remote_root=DEFAULT_REMOTE_ROOT,
+            local_state_db=None,
+            remote_state_db=None,
+            open_review=True,
+        )
 
 
 @app.command()

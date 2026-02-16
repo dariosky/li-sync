@@ -56,7 +56,8 @@ uv run limsync review \
 - Arrow keys: navigate tree
 - Enter: open/close selected folder
 - `?`: show advanced Commands modal (`Up/Down` to select, `Enter` to execute), including clear plan and metadata-suggestion bulk apply
-- `P`: view current plan as grouped action tree (copy/metadata/delete categories)
+- `P`: copy selected file/folder relative path to clipboard
+- `V`: view current plan as grouped action tree (copy/metadata/delete categories)
 - `h`: show/hide completely identical folders (preference persisted in SQLite)
 - `D`: delete selected file/folder on both sides (with confirmation)
 - `F`: diff selected file (local vs downloaded remote) in a modal
