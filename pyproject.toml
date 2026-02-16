@@ -5,12 +5,12 @@ description = "Bidirectional interactive Dropbox-like sync over SSH"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "blake3>=1.0.8",
-    "paramiko>=4.0.0",
-    "pathspec>=1.0.4",
-    "rich>=14.3.2",
-    "textual>=7.5.0",
-    "typer>=0.23.1",
+    "blake3~=1.0",
+    "paramiko~=4.0",
+    "pathspec~=1.0",
+    "rich~=14.3",
+    "textual~=7.5",
+    "typer~=0.23.1",
 ]
 
 [project.scripts]
@@ -25,5 +25,6 @@ packages = ["src/limsync"]
 
 [dependency-groups]
 dev = [
-    "pre-commit>=4.2.0",
+    "pre-commit~=4.2",
+    "pytest~=8.4",
 ]
