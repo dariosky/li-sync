@@ -1,4 +1,4 @@
-![Li-Sync](logo.png)
+![LimSync](logo.svg)
 
 An interactive Dropbox-like bidirectional sync tool over SSH for devs.
 
@@ -8,13 +8,13 @@ An interactive Dropbox-like bidirectional sync tool over SSH for devs.
   - excluded folders (`node_modules`, `.tox`, cache dirs)
 - Remote scanner over SSH helper (streamed JSONL) with nested `.dropboxignore` + excluded folders.
 - Local and remote scan status are persisted in SQLite under each sync root:
-  - `<local_root>/.li-sync/state.sqlite3`
-  - `<remote_root>/.li-sync/state.sqlite3`
+  - `<local_root>/.limsync/state.sqlite3`
+  - `<remote_root>/.limsync/state.sqlite3`
 - First comparison report that separates:
   - content status
   - metadata status (mode + mtime)
 - scan progress with adaptive path depth for long-running scans
-- Always excludes `.DS_Store`, excluded folder families, and `.li-sync`.
+- Always excludes `.DS_Store`, excluded folder families, and `.limsync`.
 - Also excludes `.venv` and Finder `Icon\\r` marker files.
 - Interactive review TUI with:
   - tree navigation
@@ -30,25 +30,25 @@ uv sync
 ## Run
 
 ```bash
-uv run li-sync --help
-uv run li-sync scan
-uv run li-sync review
+uv run limsync --help
+uv run limsync scan
+uv run limsync review
 ```
 
 ### Useful scan overrides
 
 ```bash
-uv run li-sync scan \
+uv run limsync scan \
   --local-root /Users/dario.varotto/Dropbox \
   --remote-user dario \
   --remote-host 192.168.18.18 \
   --remote-root '~/Dropbox'
 
 # Scan without opening the review UI immediately
-uv run li-sync scan --no-open-review
+uv run limsync scan --no-open-review
 
 # Review from local SQLite state
-uv run li-sync review \
+uv run limsync review \
   --local-root /Users/dario.varotto/Dropbox
 ```
 
@@ -56,8 +56,10 @@ uv run li-sync review \
 - Arrow keys: navigate tree
 - Enter: open/close selected folder
 - `?`: show advanced Commands modal (`Up/Down` to select, `Enter` to execute), including clear plan and metadata-suggestion bulk apply
+- `P`: view current plan as grouped action tree (copy/metadata/delete categories)
 - `h`: show/hide completely identical folders (preference persisted in SQLite)
-- `D`: diff selected file (local vs downloaded remote) in a modal
+- `D`: delete selected file/folder on both sides (with confirmation)
+- `F`: diff selected file (local vs downloaded remote) in a modal
 - `l`: left wins (applies to selected file/subtree)
 - `r`: right wins (applies to selected file/subtree)
 - `i`: ignore (applies to selected file/subtree)

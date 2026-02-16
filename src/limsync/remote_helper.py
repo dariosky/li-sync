@@ -11,7 +11,7 @@ import time
 from pathlib import PurePosixPath
 
 CACHE_FOLDERS = {"__pycache__", ".pytest_cache", ".cache", ".ruff_cache"}
-EXCLUDED_FOLDERS = {"node_modules", ".tox", ".venv", ".li-sync"} | CACHE_FOLDERS
+EXCLUDED_FOLDERS = {"node_modules", ".tox", ".venv", ".limsync"} | CACHE_FOLDERS
 EXCLUDED_FILE_NAMES = {".DS_Store", "Icon\r"}
 
 
@@ -352,9 +352,9 @@ def run_scan(root_arg: str, state_db: str, progress_interval: float) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Remote helper for li-sync")
+    parser = argparse.ArgumentParser(description="Remote helper for limsync")
     parser.add_argument("--root", required=True)
-    parser.add_argument("--state-db", default=".li-sync/state.sqlite3")
+    parser.add_argument("--state-db", default=".limsync/state.sqlite3")
     parser.add_argument("--progress-interval", type=float, default=0.25)
     return parser.parse_args()
 

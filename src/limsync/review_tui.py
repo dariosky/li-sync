@@ -675,7 +675,8 @@ class CommandsModal(ModalScreen[str | None]):
     COMMANDS: list[tuple[str, str]] = [
         ("h", "toggle_hide_identical"),
         ("o", "open_selected"),
-        ("D", "diff_selected"),
+        ("D", "delete_selected_both"),
+        ("F", "diff_selected"),
         ("I", "add_to_dropboxignore"),
         ("C", "clear_plan"),
         ("M", "apply_all_metadata_suggestions"),
@@ -691,7 +692,8 @@ class CommandsModal(ModalScreen[str | None]):
         descriptions = {
             "h": "show/hide identical",
             "o": "open",
-            "D": "diff",
+            "D": "delete file/folder both sides",
+            "F": "diff",
             "I": "add ignore rule",
             "C": "clear plan",
             "M": "add all meta suggestions",
@@ -730,6 +732,203 @@ class CommandsModal(ModalScreen[str | None]):
 
     def action_close(self) -> None:
         self.dismiss(None)
+
+
+class PlanTreeModal(ModalScreen[None]):
+    BINDINGS = [
+        ("escape", "close", "Close"),
+        ("c", "close", "Close"),
+        ("q", "close", "Close"),
+    ]
+    CSS = """
+    Screen {
+        background: $background 70%;
+    }
+    #plan-tree-root {
+        width: 100%;
+        height: 100%;
+        align: center middle;
+    }
+    #plan-tree-box {
+        width: 130;
+        height: 90%;
+        border: round #666666;
+        padding: 1;
+    }
+    #plan-tree-title {
+        height: auto;
+    }
+    #plan-tree {
+        height: 1fr;
+        border: round #444444;
+    }
+    #plan-tree-help {
+        height: auto;
+        color: #999999;
+    }
+    """
+
+    def __init__(self, operations: list[PlanOperation]) -> None:
+        super().__init__()
+        self.operations = operations
+
+    def compose(self) -> ComposeResult:
+        with Container(id="plan-tree-root"):
+            with Vertical(id="plan-tree-box"):
+                yield Static("Current Plan", id="plan-tree-title")
+                yield Tree("Plan", id="plan-tree")
+                yield Static("Arrows to navigate, Esc to close", id="plan-tree-help")
+
+    def _kind_label(self, kind: str) -> str:
+        labels = {
+            "copy_right": "copy left to right",
+            "copy_left": "copy right to left",
+            "metadata_update_right": "copy metadata left to right",
+            "metadata_update_left": "copy metadata right to left",
+            "delete_right": "delete on right",
+            "delete_left": "delete on left",
+        }
+        return labels.get(kind, kind)
+
+    def _build_trie(self, relpaths: list[str]) -> dict[str, dict]:
+        root: dict[str, dict] = {}
+        for relpath in sorted(set(relpaths)):
+            node = root
+            for part in PurePosixPath(relpath).parts:
+                node = node.setdefault(part, {})
+        return root
+
+    def _populate_from_trie(self, tree_node, trie: dict[str, dict]) -> None:
+        for name in sorted(trie):
+            child_trie = trie[name]
+            child = tree_node.add(name, allow_expand=bool(child_trie))
+            if child_trie:
+                self._populate_from_trie(child, child_trie)
+
+    def on_mount(self) -> None:
+        grouped: dict[str, list[str]] = {}
+        for op in self.operations:
+            grouped.setdefault(op.kind, []).append(op.relpath)
+
+        tree = self.query_one("#plan-tree", Tree)
+        tree.root.remove_children()
+        tree.root.set_label("Plan")
+        tree.root.expand()
+
+        if not grouped:
+            tree.root.add("no operations planned", allow_expand=False)
+            tree.focus()
+            return
+
+        kind_order = [
+            "copy_right",
+            "copy_left",
+            "metadata_update_right",
+            "metadata_update_left",
+            "delete_right",
+            "delete_left",
+        ]
+        for kind in kind_order:
+            if kind not in grouped:
+                continue
+            kind_node = tree.root.add(
+                self._kind_label(kind),
+                allow_expand=True,
+            )
+            trie = self._build_trie(grouped[kind])
+            self._populate_from_trie(kind_node, trie)
+            kind_node.expand()
+
+        tree.focus()
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+class ConfirmDeleteModal(ModalScreen[bool]):
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+        ("enter", "activate_focused", "Confirm"),
+        ("left", "focus_prev_button", "Prev"),
+        ("right", "focus_next_button", "Next"),
+        ("d", "confirm", "Delete"),
+        ("c", "cancel", "Cancel"),
+    ]
+    CSS = """
+    Screen {
+        background: $background 70%;
+    }
+    #delete-root {
+        width: 100%;
+        height: 100%;
+        align: center middle;
+    }
+    #delete-box {
+        width: 74;
+        height: auto;
+        border: round #666666;
+        padding: 1 2;
+    }
+    #delete-buttons {
+        height: auto;
+    }
+    """
+
+    def __init__(self, selected_label: str, files_count: int) -> None:
+        super().__init__()
+        self.selected_label = selected_label
+        self.files_count = files_count
+
+    def compose(self) -> ComposeResult:
+        lines = [
+            "Delete selected item on both sides?",
+            "",
+            f"Target: {self.selected_label}",
+            f"Files affected: {self.files_count}",
+        ]
+        with Container(id="delete-root"):
+            with Vertical(id="delete-box"):
+                yield Static("\n".join(lines))
+                with Horizontal(id="delete-buttons"):
+                    yield Button("Cancel [C]", id="cancel")
+                    yield Button("DELETE [D]", id="delete", variant="error")
+
+    def on_mount(self) -> None:
+        self.query_one("#delete", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "delete":
+            self.dismiss(True)
+        else:
+            self.dismiss(False)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    def action_focus_prev_button(self) -> None:
+        delete_btn = self.query_one("#delete", Button)
+        cancel_btn = self.query_one("#cancel", Button)
+        if delete_btn.has_focus:
+            cancel_btn.focus()
+        else:
+            delete_btn.focus()
+
+    def action_focus_next_button(self) -> None:
+        self.action_focus_prev_button()
+
+    def action_activate_focused(self) -> None:
+        delete_btn = self.query_one("#delete", Button)
+        cancel_btn = self.query_one("#cancel", Button)
+        if delete_btn.has_focus:
+            self.dismiss(True)
+            return
+        if cancel_btn.has_focus:
+            self.dismiss(False)
+            return
+        self.dismiss(False)
 
 
 def _build_model(
@@ -806,6 +1005,7 @@ def _build_model(
 
 
 class ReviewApp(App[None]):
+    TITLE = "LimSync"
     CSS = """
     Screen {
         layout: vertical;
@@ -838,7 +1038,8 @@ class ReviewApp(App[None]):
         Binding("h", "toggle_hide_identical", "Hide Identical", show=False),
         Binding("enter", "toggle_cursor_node", "Open/Close"),
         Binding("o", "open_selected", "Open", show=False),
-        Binding("D", "diff_selected", "Diff", show=False),
+        Binding("D", "delete_selected_both", "Delete Both", show=False),
+        Binding("F", "diff_selected", "Diff", show=False),
         Binding("P", "view_plan", "View Plan", show=False),
         Binding("C", "clear_plan", "Clear Plan", show=False),
         Binding("M", "apply_all_metadata_suggestions", "Meta Suggestions", show=False),
@@ -1026,7 +1227,8 @@ class ReviewApp(App[None]):
                 Binding("h", "toggle_hide_identical", label, show=False),
                 Binding("enter", "toggle_cursor_node", "Open/Close"),
                 Binding("o", "open_selected", "Open", show=False),
-                Binding("D", "diff_selected", "Diff", show=False),
+                Binding("D", "delete_selected_both", "Delete Both", show=False),
+                Binding("F", "diff_selected", "Diff", show=False),
                 Binding("P", "view_plan", "View Plan", show=False),
                 Binding("C", "clear_plan", "Clear Plan", show=False),
                 Binding(
@@ -1180,7 +1382,7 @@ class ReviewApp(App[None]):
     def _download_remote_file(self, relpath: str) -> Path:
         user, host, remote_root = parse_remote_address(self.remote_address)
         if self._open_temp_dir is None:
-            self._open_temp_dir = Path(tempfile.mkdtemp(prefix="li-sync-open-"))
+            self._open_temp_dir = Path(tempfile.mkdtemp(prefix="limsync-open-"))
         target = self._open_temp_dir / relpath
         target.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1667,6 +1869,82 @@ class ReviewApp(App[None]):
 
     def action_apply_suggested(self) -> None:
         self._apply_action(ACTION_SUGGESTED)
+
+    def action_view_plan(self) -> None:
+        plan_ops = build_plan_operations(self.diffs, self.action_overrides)
+        self.push_screen(PlanTreeModal(plan_ops))
+
+    def _delete_ops_for_selected(self) -> tuple[str, list[PlanOperation]]:
+        selected = self._selected_node()
+        if selected is None:
+            return "", []
+        kind, relpath = selected
+        relpaths = (
+            [relpath] if kind == "file" else list(self.dir_files_map.get(relpath, []))
+        )
+
+        ops_by_key: dict[tuple[str, str], PlanOperation] = {}
+        for target_relpath in relpaths:
+            diff = self.diffs_by_relpath.get(target_relpath)
+            if diff is None:
+                continue
+            if diff.content_state != ContentState.ONLY_REMOTE:
+                ops_by_key[("delete_left", target_relpath)] = PlanOperation(
+                    "delete_left", target_relpath
+                )
+            if diff.content_state != ContentState.ONLY_LOCAL:
+                ops_by_key[("delete_right", target_relpath)] = PlanOperation(
+                    "delete_right", target_relpath
+                )
+        return relpath, list(ops_by_key.values())
+
+    def action_delete_selected_both(self) -> None:
+        relpath, ops = self._delete_ops_for_selected()
+        if not relpath:
+            self._notify_message(
+                "Select a file or folder to delete.", severity="warning"
+            )
+            return
+        if relpath == ".":
+            self._notify_message("Cannot delete the root folder.", severity="warning")
+            return
+        if not ops:
+            self._notify_message("Nothing to delete for selection.", severity="warning")
+            return
+
+        files_affected = len({op.relpath for op in ops})
+        self.push_screen(
+            ConfirmDeleteModal(relpath, files_affected),
+            callback=lambda confirmed: self._on_delete_confirmed(ops, confirmed),
+        )
+
+    def _on_delete_confirmed(
+        self, operations: list[PlanOperation], confirmed: bool
+    ) -> None:
+        if not confirmed:
+            self.status_message = "Delete cancelled."
+            self._update_plan_panel()
+            return
+
+        self._pending_apply_ops = operations
+        self._apply_required_ops = {}
+        self._apply_done_ops = {}
+        self._apply_newly_completed = set()
+        for op in operations:
+            self._apply_required_ops.setdefault(op.relpath, set()).add(op.kind)
+
+        self.push_screen(
+            ApplyRunModal(
+                local_root=self.local_root,
+                remote_address=self.remote_address,
+                operations=operations,
+                progress_event_cb=self._on_apply_progress,
+            ),
+            callback=self._on_delete_finished,
+        )
+
+    def _on_delete_finished(self, result: ExecuteResult | None) -> None:
+        self._on_apply_finished(result)
 
     def _refresh_after_plan_change(self) -> None:
         self._rebuild_tree()

@@ -31,7 +31,10 @@ from .state_db import (
     save_current_state,
 )
 
-app = typer.Typer(help="Interactive Dropbox-like sync tooling over SSH")
+app = typer.Typer(
+    help="Interactive Dropbox-like sync tooling over SSH",
+    invoke_without_command=True,
+)
 console = Console()
 
 
@@ -92,6 +95,13 @@ def _remote_state_db_path(remote_root: str) -> str:
     return f"{remote_root.rstrip('/')}/{DEFAULT_STATE_SUBPATH}"
 
 
+@app.callback()
+def _default_command(ctx: typer.Context) -> None:
+    """Run `scan` when no subcommand is provided."""
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(scan)
+
+
 @app.command()
 def scan(
     local_root: Path = typer.Option(DEFAULT_LOCAL_ROOT, help="Local root folder"),
@@ -101,11 +111,11 @@ def scan(
     remote_root: str = typer.Option(DEFAULT_REMOTE_ROOT, help="Remote root folder"),
     local_state_db: Path | None = typer.Option(
         None,
-        help="Local SQLite path for scan status (default: <local_root>/.li-sync/state.sqlite3)",
+        help="Local SQLite path for scan status (default: <local_root>/.limsync/state.sqlite3)",
     ),
     remote_state_db: str | None = typer.Option(
         None,
-        help="Remote SQLite path for scan status (default: <remote_root>/.li-sync/state.sqlite3)",
+        help="Remote SQLite path for scan status (default: <remote_root>/.limsync/state.sqlite3)",
     ),
     open_review: bool = typer.Option(
         True,
@@ -267,7 +277,7 @@ def scan(
         )
     else:
         console.print(
-            "Run `li-sync review` to inspect changes in the interactive tree UI."
+            "Run `limsync review` to inspect changes in the interactive tree UI."
         )
 
 
@@ -279,7 +289,7 @@ def review(
     ),
     db_path: Path | None = typer.Option(
         None,
-        help="Path to local SQLite status DB (default: <local_root>/.li-sync/state.sqlite3)",
+        help="Path to local SQLite status DB (default: <local_root>/.limsync/state.sqlite3)",
     ),
     hide_identical: bool | None = typer.Option(
         None,
@@ -299,7 +309,7 @@ def review(
 
     context = get_state_context(resolved_db)
     if context is None:
-        console.print("No scan state recorded yet. Run `li-sync scan` first.")
+        console.print("No scan state recorded yet. Run `limsync scan` first.")
         raise typer.Exit(1)
 
     if hide_identical is None:

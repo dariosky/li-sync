@@ -54,7 +54,7 @@ Use exactly:
 
 ```python
 CACHE_FOLDERS = {"__pycache__", ".pytest_cache", ".cache", ".ruff_cache"}
-EXCLUDED_FOLDERS = {"node_modules", ".tox", ".venv", ".li-sync"} | CACHE_FOLDERS
+EXCLUDED_FOLDERS = {"node_modules", ".tox", ".venv", ".limsync"} | CACHE_FOLDERS
 ```
 
 Any path under those directories must be excluded from sync planning and apply operations.
@@ -72,8 +72,8 @@ Any path under those directories must be excluded from sync planning and apply o
 - Hide completely identical folders by default, with persisted UI preference in local SQLite.
 
 ## CLI Surface (Target)
-- `li-sync scan`
-- `li-sync review`
+- `limsync scan`
+- `limsync review`
 
 Apply is intentionally executed inside the review TUI (`a`) with explicit confirmation.
 Avoid irreversible behavior in default commands.
@@ -95,8 +95,8 @@ This is required to satisfy "identical content but metadata drift" visibility.
 
 ## Implementation Notes
 - Use a remote helper script over SSH for fast remote scans returning structured JSONL.
-- Persist local scan status in `<local_root>/.li-sync/state.sqlite3`.
-- Persist remote scan status in `<remote_root>/.li-sync/state.sqlite3`.
+- Persist local scan status in `<local_root>/.limsync/state.sqlite3`.
+- Persist remote scan status in `<remote_root>/.limsync/state.sqlite3`.
 - Compare with cheap checks first.
 - Do not hash file content during initial scan phase.
 - Persist one current diff/worktree state in SQLite and preserve user action overrides when paths remain applicable.
