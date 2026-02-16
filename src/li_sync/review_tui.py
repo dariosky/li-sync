@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import platform
 import re
 import subprocess
@@ -13,7 +14,7 @@ from pathlib import Path, PurePosixPath
 import paramiko
 from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.binding import BindingsMap
+from textual.binding import Binding, BindingsMap
 from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Header, ProgressBar, Static, Tree
@@ -32,6 +33,7 @@ from .planner_apply import (
     summarize_operations,
 )
 from .state_db import (
+    delete_paths_from_current_state,
     load_action_overrides,
     load_current_diffs,
     mark_paths_identical,
@@ -59,6 +61,8 @@ class FileEntry:
     metadata_state: str
     metadata_diff: list[str]
     metadata_details: list[str]
+    local_size: int | None
+    remote_size: int | None
 
 
 @dataclass
@@ -169,6 +173,12 @@ def _row_to_diff(row: dict[str, object]) -> DiffRecord:
             if row.get("metadata_source") is not None
             else None
         ),
+        local_size=(
+            int(row["local_size"]) if row.get("local_size") is not None else None
+        ),
+        remote_size=(
+            int(row["remote_size"]) if row.get("remote_size") is not None else None
+        ),
     )
 
 
@@ -213,6 +223,8 @@ def _parse_metadata_details(details: list[str]) -> dict[str, str]:
 
 
 def _suggested_action_with_reason(entry: FileEntry, suggested_ops: list[str]) -> str:
+    if entry.content_state == "different":
+        return "no suggestion (manual content conflict)"
     if not suggested_ops:
         return "-"
     primary = suggested_ops[0]
@@ -264,6 +276,9 @@ class ConfirmApplyModal(ModalScreen[bool]):
         ("c", "cancel", "Cancel"),
     ]
     CSS = """
+    Screen {
+        background: $background 70%;
+    }
     #confirm-root {
         width: 100%;
         height: 100%;
@@ -276,7 +291,9 @@ class ConfirmApplyModal(ModalScreen[bool]):
         padding: 1 2;
     }
     #confirm-buttons {
+        width: 100%;
         height: auto;
+        align: center middle;
     }
     """
 
@@ -301,7 +318,7 @@ class ConfirmApplyModal(ModalScreen[bool]):
             self.dismiss(False)
 
     def on_mount(self) -> None:
-        self.query_one("#cancel", Button).focus()
+        self.query_one("#apply", Button).focus()
 
     def action_cancel(self) -> None:
         self.dismiss(False)
@@ -338,8 +355,12 @@ class ApplyRunModal(ModalScreen[ExecuteResult | None]):
         ("escape", "close_if_done", "Close"),
         ("enter", "close_if_done", "Close"),
         ("c", "close_if_done", "Close"),
+        ("q", "close_if_done", "Close"),
     ]
     CSS = """
+    Screen {
+        background: $background 70%;
+    }
     #apply-root {
         width: 100%;
         height: 100%;
@@ -359,6 +380,11 @@ class ApplyRunModal(ModalScreen[ExecuteResult | None]):
         height: 12;
         border: round #444444;
         padding: 1;
+    }
+    #apply-close-row {
+        width: 100%;
+        height: auto;
+        align: center middle;
     }
     """
 
@@ -385,7 +411,8 @@ class ApplyRunModal(ModalScreen[ExecuteResult | None]):
                     total=len(self.operations), show_eta=False, id="apply-progress"
                 )
                 yield Static("Errors:\n-", id="errors")
-                yield Button("Running...", id="close", disabled=True)
+                with Container(id="apply-close-row"):
+                    yield Button("Running...", id="close", disabled=True)
 
     def on_mount(self) -> None:
         self.run_worker(self._run_apply(), exclusive=True)
@@ -424,6 +451,7 @@ class ApplyRunModal(ModalScreen[ExecuteResult | None]):
         close_btn = self.query_one("#close", Button)
         close_btn.disabled = False
         close_btn.label = "Close"
+        close_btn.focus()
 
     def _on_progress(
         self, done: int, total: int, op, ok: bool, error: str | None
@@ -460,6 +488,9 @@ class OpenSideModal(ModalScreen[str | None]):
         ("c", "cancel", "Cancel"),
     ]
     CSS = """
+    Screen {
+        background: $background 70%;
+    }
     #open-side-root {
         width: 100%;
         height: 100%;
@@ -543,6 +574,157 @@ class OpenSideModal(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class FileDiffModal(ModalScreen[None]):
+    BINDINGS = [
+        ("escape", "close", "Close"),
+        ("enter", "close", "Close"),
+        ("c", "close", "Close"),
+        ("q", "close", "Close"),
+    ]
+    CSS = """
+    Screen {
+        background: $background 70%;
+    }
+    #diff-root {
+        width: 100%;
+        height: 100%;
+        align: center middle;
+    }
+    #diff-box {
+        width: 140;
+        height: 90%;
+        border: round #666666;
+        padding: 1;
+    }
+    #diff-title {
+        height: auto;
+    }
+    #diff-content {
+        height: 1fr;
+        border: round #444444;
+        padding: 1;
+    }
+    #diff-close-row {
+        width: 100%;
+        height: auto;
+        align: center middle;
+    }
+    """
+
+    def __init__(self, relpath: str, diff_text: str) -> None:
+        super().__init__()
+        self.relpath = relpath
+        self.diff_text = diff_text
+
+    def compose(self) -> ComposeResult:
+        with Container(id="diff-root"):
+            with Vertical(id="diff-box"):
+                yield Static(f"Diff: local vs remote\n{self.relpath}", id="diff-title")
+                yield Static(Text(self.diff_text), id="diff-content")
+                with Container(id="diff-close-row"):
+                    yield Button("Close", id="close")
+
+    def on_mount(self) -> None:
+        self.query_one("#close", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "close":
+            self.dismiss(None)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+class CommandsModal(ModalScreen[str | None]):
+    BINDINGS = [
+        ("escape", "close", "Close"),
+        ("enter", "run_selected", "Run"),
+        ("up", "cursor_up", "Up"),
+        ("down", "cursor_down", "Down"),
+        ("k", "cursor_up", "Up"),
+        ("j", "cursor_down", "Down"),
+        ("c", "close", "Close"),
+        ("q", "close", "Close"),
+    ]
+    CSS = """
+    Screen {
+        background: $background 70%;
+    }
+    #commands-root {
+        width: 100%;
+        height: 100%;
+        align: center middle;
+    }
+    #commands-box {
+        width: 72;
+        height: auto;
+        border: round #666666;
+        padding: 1 2;
+    }
+    #commands-list {
+        border: round #444444;
+        padding: 1;
+    }
+    #commands-help {
+        height: auto;
+        color: #999999;
+    }
+    """
+
+    COMMANDS: list[tuple[str, str]] = [
+        ("h", "toggle_hide_identical"),
+        ("o", "open_selected"),
+        ("D", "diff_selected"),
+        ("I", "add_to_dropboxignore"),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.selected_index = 0
+
+    def _render_commands(self) -> str:
+        rows: list[str] = ["Advanced Commands", ""]
+        descriptions = {
+            "h": "show/hide identical",
+            "o": "open",
+            "D": "diff",
+            "I": "add ignore rule",
+        }
+        for idx, (key, _action) in enumerate(self.COMMANDS):
+            pointer = ">" if idx == self.selected_index else " "
+            rows.append(f"{pointer} {idx + 1}. {key} - {descriptions[key]}")
+        return "\n".join(rows)
+
+    def compose(self) -> ComposeResult:
+        with Container(id="commands-root"):
+            with Vertical(id="commands-box"):
+                yield Static("", id="commands-list")
+                yield Static(
+                    "Up/Down to select, Enter to run, Esc to close", id="commands-help"
+                )
+
+    def on_mount(self) -> None:
+        self._refresh_list()
+
+    def _refresh_list(self) -> None:
+        self.query_one("#commands-list", Static).update(self._render_commands())
+
+    def action_cursor_up(self) -> None:
+        self.selected_index = (self.selected_index - 1) % len(self.COMMANDS)
+        self._refresh_list()
+
+    def action_cursor_down(self) -> None:
+        self.selected_index = (self.selected_index + 1) % len(self.COMMANDS)
+        self._refresh_list()
+
+    def action_run_selected(self) -> None:
+        _key, action_name = self.COMMANDS[self.selected_index]
+        self.dismiss(action_name)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 def _build_model(
     rows: list[dict[str, object]],
     root_name: str,
@@ -597,6 +779,12 @@ def _build_model(
             metadata_state=str(row["metadata_state"]),
             metadata_diff=list(row.get("metadata_diff", [])),
             metadata_details=list(row.get("metadata_details", [])),
+            local_size=(
+                int(row["local_size"]) if row.get("local_size") is not None else None
+            ),
+            remote_size=(
+                int(row["remote_size"]) if row.get("remote_size") is not None else None
+            ),
         )
         current.files.append(file_entry)
         files_by_relpath[relpath] = file_entry
@@ -638,15 +826,18 @@ class ReviewApp(App[None]):
     """
 
     BINDINGS = [
-        ("q", "quit", "Quit"),
-        ("h", "toggle_hide_identical", "Hide Identical"),
-        ("enter", "toggle_cursor_node", "Open/Close"),
-        ("o", "open_selected", "Open"),
-        ("l", "apply_left_wins", "Left Wins"),
-        ("r", "apply_right_wins", "Right Wins"),
-        ("i", "apply_ignore", "Ignore"),
-        ("s", "apply_suggested", "Suggested"),
-        ("a", "apply_plan", "Apply Plan"),
+        Binding("q", "quit", "Quit"),
+        Binding("question_mark", "show_commands", "Commands"),
+        Binding("h", "toggle_hide_identical", "Hide Identical", show=False),
+        Binding("enter", "toggle_cursor_node", "Open/Close"),
+        Binding("o", "open_selected", "Open", show=False),
+        Binding("D", "diff_selected", "Diff", show=False),
+        Binding("l", "apply_left_wins", "Left Wins"),
+        Binding("r", "apply_right_wins", "Right Wins"),
+        Binding("i", "apply_ignore", "Ignore"),
+        Binding("I", "add_to_dropboxignore", "Add Ignore Rule", show=False),
+        Binding("s", "apply_suggested", "Suggested"),
+        Binding("a", "apply_plan", "Apply Plan"),
     ]
 
     def __init__(
@@ -668,6 +859,7 @@ class ReviewApp(App[None]):
         self._apply_done_ops: dict[str, set[str]] = {}
         self._apply_newly_completed: set[str] = set()
         self._open_temp_dir: Path | None = None
+        self._expanded_dir_relpaths: set[str] = {"."}
 
         self._reload_state()
         self.action_overrides = load_action_overrides(self.db_path)
@@ -734,12 +926,75 @@ class ReviewApp(App[None]):
             tree_node.add(label, data=("file", file_entry.relpath), allow_expand=False)
 
     def _rebuild_tree(self) -> None:
+        expanded_before, selected_before = self._capture_tree_state()
         tree = self.query_one(Tree)
         tree.root.remove_children()
         tree.root.set_label(_folder_label(self.root))
         tree.root.data = ("dir", self.root.relpath)
         self._populate_node(tree.root, self.root)
         tree.root.expand()
+        self._restore_tree_state(expanded_before, selected_before)
+
+    def _capture_tree_state(self) -> tuple[set[str], tuple[str, str] | None]:
+        tree = self.query_one(Tree)
+        expanded_dirs: set[str] = {"."}
+        stack = [tree.root]
+        while stack:
+            node = stack.pop()
+            data = getattr(node, "data", None)
+            if data and str(data[0]) == "dir" and node.is_expanded:
+                expanded_dirs.add(str(data[1]))
+            for child in reversed(getattr(node, "children", ())):
+                stack.append(child)
+
+        selected: tuple[str, str] | None = None
+        cursor_data = getattr(tree.cursor_node, "data", None)
+        if cursor_data:
+            selected = (str(cursor_data[0]), str(cursor_data[1]))
+        return expanded_dirs, selected
+
+    def _restore_tree_state(
+        self, expanded_dirs: set[str], selected: tuple[str, str] | None
+    ) -> None:
+        tree = self.query_one(Tree)
+        restored_expanded: set[str] = {"."}
+
+        def expand_dir_node(node) -> None:
+            data = getattr(node, "data", None)
+            if not data or str(data[0]) != "dir":
+                return
+            relpath = str(data[1])
+            if relpath != "." and relpath not in expanded_dirs:
+                return
+            entry = self.dirs_by_relpath.get(relpath)
+            if entry is None:
+                return
+            self._populate_node(node, entry)
+            node.expand()
+            restored_expanded.add(relpath)
+            for child in getattr(node, "children", ()):
+                expand_dir_node(child)
+
+        def find_node_by_data(node, target: tuple[str, str]):
+            data = getattr(node, "data", None)
+            if data and str(data[0]) == target[0] and str(data[1]) == target[1]:
+                return node
+            for child in getattr(node, "children", ()):
+                found = find_node_by_data(child, target)
+                if found is not None:
+                    return found
+            return None
+
+        expand_dir_node(tree.root)
+        if selected is not None:
+            selected_node = find_node_by_data(tree.root, selected)
+            if selected_node is not None:
+                tree.select_node(selected_node)
+                line = getattr(selected_node, "line", None)
+                if isinstance(line, int):
+                    tree.move_cursor_to_line(line, animate=False)
+                tree.scroll_to_node(selected_node)
+        self._expanded_dir_relpaths = restored_expanded
 
     def _operations_for_entry(self, relpath: str, action: str) -> list[str]:
         diff = self.diffs_by_relpath.get(relpath)
@@ -756,15 +1011,18 @@ class ReviewApp(App[None]):
         apply_action = "apply_plan" if self.can_apply else "apply_plan_disabled"
         self._bindings = BindingsMap(
             [
-                ("q", "quit", "Quit"),
-                ("h", "toggle_hide_identical", label),
-                ("enter", "toggle_cursor_node", "Open/Close"),
-                ("o", "open_selected", "Open"),
-                ("l", "apply_left_wins", "Left Wins"),
-                ("r", "apply_right_wins", "Right Wins"),
-                ("i", "apply_ignore", "Ignore"),
-                ("s", "apply_suggested", "Suggested"),
-                ("a", apply_action, apply_label),
+                Binding("q", "quit", "Quit"),
+                Binding("question_mark", "show_commands", "Commands"),
+                Binding("h", "toggle_hide_identical", label, show=False),
+                Binding("enter", "toggle_cursor_node", "Open/Close"),
+                Binding("o", "open_selected", "Open", show=False),
+                Binding("D", "diff_selected", "Diff", show=False),
+                Binding("l", "apply_left_wins", "Left Wins"),
+                Binding("r", "apply_right_wins", "Right Wins"),
+                Binding("i", "apply_ignore", "Ignore"),
+                Binding("I", "add_to_dropboxignore", "Add Ignore Rule", show=False),
+                Binding("s", "apply_suggested", "Suggested"),
+                Binding("a", apply_action, apply_label),
             ]
         )
         self.refresh_bindings()
@@ -814,7 +1072,7 @@ class ReviewApp(App[None]):
             f"Uncertain: {c.uncertain}",
             "",
             f"Hide identical folders: {'ON' if self.hide_identical else 'OFF'}",
-            "Actions: o=open l=left wins r=right wins i=ignore s=suggested",
+            "Actions: ?=commands l=left wins r=right wins i=ignore s=suggested",
         ]
         self.query_one("#info", Static).update("\n".join(lines))
 
@@ -824,6 +1082,17 @@ class ReviewApp(App[None]):
             entry.relpath, self._effective_action(entry.relpath)
         )
         lines = [f"File: {entry.relpath}", ""]
+        if entry.local_size is not None and entry.remote_size is not None:
+            if entry.local_size == entry.remote_size:
+                lines.append(f"Size: {entry.local_size:,} bytes")
+            else:
+                lines.append(
+                    f"Size: local={entry.local_size:,} bytes remote={entry.remote_size:,} bytes"
+                )
+        elif entry.local_size is not None:
+            lines.append(f"Size: local={entry.local_size:,} bytes")
+        elif entry.remote_size is not None:
+            lines.append(f"Size: remote={entry.remote_size:,} bytes")
         if entry.content_state not in {"identical", "unknown"}:
             lines.append(f"Content state: {entry.content_state}")
         if entry.metadata_state == "different":
@@ -842,7 +1111,7 @@ class ReviewApp(App[None]):
                 f"Current action: {self._effective_action(entry.relpath)}",
                 f"Current operations: {_ops_text(current_ops)}",
                 "",
-                "Actions: o=open l=left wins r=right wins i=ignore s=suggested",
+                "Actions: ?=commands l=left wins r=right wins i=ignore s=suggested",
             ]
         )
         self.query_one("#info", Static).update("\n".join(lines))
@@ -1043,6 +1312,13 @@ class ReviewApp(App[None]):
             file_entry.metadata_state = "identical"
             file_entry.metadata_diff = []
             file_entry.metadata_details = []
+            resolved_size = (
+                file_entry.local_size
+                if file_entry.local_size is not None
+                else file_entry.remote_size
+            )
+            file_entry.local_size = resolved_size
+            file_entry.remote_size = resolved_size
             new_counts = _file_counts(file_entry)
 
             self.diffs_by_relpath[relpath] = DiffRecord(
@@ -1051,6 +1327,8 @@ class ReviewApp(App[None]):
                 metadata_state=MetadataState.IDENTICAL,
                 metadata_diff=(),
                 metadata_details=(),
+                local_size=file_entry.local_size,
+                remote_size=file_entry.remote_size,
             )
             self.action_overrides.pop(relpath, None)
             override_updates[relpath] = ACTION_IGNORE
@@ -1203,9 +1481,22 @@ class ReviewApp(App[None]):
         kind, relpath = data
         if kind != "dir":
             return
+        self._expanded_dir_relpaths.add(str(relpath))
         dir_entry = self.dirs_by_relpath.get(str(relpath))
-        if dir_entry is not None:
+        # Avoid repopulating already-built nodes during restore/rebuild.
+        # Re-population here can reset nested expansion state.
+        if dir_entry is not None and not event.node.children:
             self._populate_node(event.node, dir_entry)
+
+    def on_tree_node_collapsed(self, event: Tree.NodeCollapsed) -> None:
+        data = event.node.data
+        if not data:
+            return
+        kind, relpath = data
+        if kind != "dir":
+            return
+        if str(relpath) != ".":
+            self._expanded_dir_relpaths.discard(str(relpath))
 
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
         data = event.node.data
@@ -1246,9 +1537,12 @@ class ReviewApp(App[None]):
             return
         if node.is_expanded:
             node.collapse()
+            if str(relpath) != ".":
+                self._expanded_dir_relpaths.discard(str(relpath))
         else:
             self._populate_node(node, dir_entry)
             node.expand()
+            self._expanded_dir_relpaths.add(str(relpath))
 
     def action_apply_left_wins(self) -> None:
         self._apply_action(ACTION_LEFT_WINS)
@@ -1259,8 +1553,188 @@ class ReviewApp(App[None]):
     def action_apply_ignore(self) -> None:
         self._apply_action(ACTION_IGNORE)
 
+    def _selected_node(self) -> tuple[str, str] | None:
+        selected = self._current_selection()
+        if selected is None:
+            return None
+        kind, relpath = selected
+        if kind not in {"dir", "file"}:
+            return None
+        return kind, relpath
+
+    def _append_dropboxignore_rule(
+        self,
+        parent_relpath: str,
+        rule_name: str,
+        *,
+        is_dir: bool,
+    ) -> bool:
+        parent_path = (
+            self.local_root
+            if parent_relpath == "."
+            else self.local_root / PurePosixPath(parent_relpath)
+        )
+        ignore_path = parent_path / ".dropboxignore"
+        rule = f"{rule_name}/" if is_dir else rule_name
+        existing_aliases = {rule}
+        if is_dir:
+            existing_aliases.add(rule_name)
+
+        if ignore_path.exists():
+            content = ignore_path.read_text(encoding="utf-8")
+        else:
+            parent_path.mkdir(parents=True, exist_ok=True)
+            content = ""
+
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped in existing_aliases:
+                return False
+
+        if content and not content.endswith("\n"):
+            content += "\n"
+        content += f"{rule}\n"
+        ignore_path.write_text(content, encoding="utf-8")
+        return True
+
+    def action_add_to_dropboxignore(self) -> None:
+        selected = self._selected_node()
+        if selected is None:
+            self._notify_message("Select a file or folder first.", severity="warning")
+            return
+        kind, relpath = selected
+        if relpath == ".":
+            self._notify_message("Cannot ignore the root folder.", severity="warning")
+            return
+
+        selected_path = PurePosixPath(relpath)
+        parent_relpath = selected_path.parent.as_posix()
+        name = selected_path.name
+
+        try:
+            added = self._append_dropboxignore_rule(
+                parent_relpath=parent_relpath,
+                rule_name=name,
+                is_dir=(kind == "dir"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._notify_message(
+                f"Failed to update .dropboxignore: {exc}", severity="error"
+            )
+            return
+
+        removed_paths = (
+            {relpath} if kind == "file" else set(self.dir_files_map.get(relpath, []))
+        )
+        if removed_paths:
+            delete_paths_from_current_state(self.db_path, removed_paths)
+
+        self._reload_state()
+        self.action_overrides = load_action_overrides(self.db_path)
+        self._expanded_dir_relpaths.discard(relpath)
+        ignore_file = (
+            ".dropboxignore"
+            if parent_relpath == "."
+            else f"{parent_relpath}/.dropboxignore"
+        )
+        if added:
+            self.status_message = f"Added '{name}' to {ignore_file}."
+        else:
+            self.status_message = f"'{name}' already present in {ignore_file}."
+        self._rebuild_tree()
+        self._set_info_for_dir(self.root)
+        self._update_plan_panel()
+
     def action_apply_suggested(self) -> None:
         self._apply_action(ACTION_SUGGESTED)
+
+    def _on_command_chosen(self, action_name: str | None) -> None:
+        if action_name is None:
+            return
+        handler = getattr(self, f"action_{action_name}", None)
+        if callable(handler):
+            handler()
+
+    def action_show_commands(self) -> None:
+        self.push_screen(CommandsModal(), callback=self._on_command_chosen)
+
+    def _resolve_local_path(self, relpath: str) -> Path:
+        for candidate in self._candidate_relpaths(relpath):
+            candidate_path = self.local_root / candidate
+            if candidate_path.exists():
+                return candidate_path
+        return self.local_root / relpath
+
+    def _read_text_lines_for_diff(
+        self, file_path: Path, side_label: str
+    ) -> tuple[list[str] | None, str | None]:
+        try:
+            payload = file_path.read_bytes()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"{side_label}: read failed ({exc})"
+        if b"\x00" in payload:
+            return (
+                None,
+                f"{side_label}: binary content detected; textual diff is not available.",
+            )
+        text = payload.decode("utf-8", errors="replace")
+        return text.splitlines(), None
+
+    def _build_text_diff(
+        self, relpath: str, local_path: Path, remote_path: Path
+    ) -> str:
+        local_lines, local_error = self._read_text_lines_for_diff(local_path, "local")
+        if local_error is not None:
+            return local_error
+        remote_lines, remote_error = self._read_text_lines_for_diff(
+            remote_path, "remote"
+        )
+        if remote_error is not None:
+            return remote_error
+
+        diff_lines = list(
+            difflib.unified_diff(
+                local_lines or [],
+                remote_lines or [],
+                fromfile=f"local/{relpath}",
+                tofile=f"remote/{relpath}",
+                lineterm="",
+            )
+        )
+        if not diff_lines:
+            return "No textual differences."
+
+        max_lines = 2500
+        if len(diff_lines) > max_lines:
+            shown = diff_lines[:max_lines]
+            shown.append("")
+            shown.append(
+                f"... diff truncated: showing {max_lines} of {len(diff_lines)} lines ..."
+            )
+            diff_lines = shown
+        return "\n".join(diff_lines)
+
+    def action_diff_selected(self) -> None:
+        relpath = self._selected_file_relpath()
+        if relpath is None:
+            self._notify_message("Select a file to diff.", severity="warning")
+            return
+        if not self._has_local_copy(relpath) or not self._has_remote_copy(relpath):
+            self._notify_message(
+                "Diff is available only when both local and remote files exist.",
+                severity="warning",
+            )
+            return
+
+        try:
+            local_path = self._resolve_local_path(relpath)
+            remote_path = self._download_remote_file(relpath)
+            diff_text = self._build_text_diff(relpath, local_path, remote_path)
+            self.push_screen(FileDiffModal(relpath, diff_text))
+        except Exception as exc:  # noqa: BLE001
+            self._notify_message(f"Diff failed: {exc}", severity="error")
 
     def action_open_selected(self) -> None:
         relpath = self._selected_file_relpath()

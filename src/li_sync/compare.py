@@ -63,6 +63,8 @@ def compare_records(
                     metadata_diff=(),
                     metadata_details=(),
                     metadata_source=None,
+                    local_size=local.size,
+                    remote_size=None,
                 )
             )
             continue
@@ -76,6 +78,8 @@ def compare_records(
                     metadata_diff=(),
                     metadata_details=(),
                     metadata_source=None,
+                    local_size=None,
+                    remote_size=remote.size,
                 )
             )
             continue
@@ -93,6 +97,8 @@ def compare_records(
                         f"type: {local.node_type.value} -> {remote.node_type.value}",
                     ),
                     metadata_source=None,
+                    local_size=local.size,
+                    remote_size=remote.size,
                 )
             )
             continue
@@ -113,6 +119,8 @@ def compare_records(
                     metadata_diff=metadata_diff,
                     metadata_details=metadata_details,
                     metadata_source=metadata_source,
+                    local_size=local.size,
+                    remote_size=remote.size,
                 )
             )
             continue
@@ -139,6 +147,8 @@ def compare_records(
                 metadata_diff=metadata_diff,
                 metadata_details=metadata_details,
                 metadata_source=metadata_source,
+                local_size=local.size,
+                remote_size=remote.size,
             )
         )
 

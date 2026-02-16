@@ -19,6 +19,7 @@ from .config import (
     DEFAULT_STATE_SUBPATH,
     RemoteConfig,
 )
+from .excludes import load_ignore_rules_tree
 from .models import ContentState, FileRecord, MetadataState
 from .review_tui import run_review_tui
 from .scanner_local import LocalScanner
@@ -197,6 +198,20 @@ def scan(
                     f"time={_format_seconds(remote_elapsed)}"
                 ),
             )
+
+    # Apply local ignore policy to both sides before comparison, so excluded
+    # paths don't show up as one-sided diffs.
+    local_ignore_rules = load_ignore_rules_tree(local_root)
+    local_records = {
+        relpath: record
+        for relpath, record in local_records.items()
+        if not local_ignore_rules.is_ignored(PurePosixPath(relpath), is_dir=False)
+    }
+    remote_records = {
+        relpath: record
+        for relpath, record in remote_records.items()
+        if not local_ignore_rules.is_ignored(PurePosixPath(relpath), is_dir=False)
+    }
 
     diffs = compare_records(local_records, remote_records)
 

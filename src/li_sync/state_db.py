@@ -70,7 +70,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             metadata_state TEXT NOT NULL,
             metadata_diff_json TEXT NOT NULL,
             metadata_detail_json TEXT NOT NULL DEFAULT '[]',
-            metadata_source TEXT
+            metadata_source TEXT,
+            local_size INTEGER,
+            remote_size INTEGER
         )
         """
     )
@@ -90,6 +92,10 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         )
     if "metadata_source" not in col_names:
         conn.execute("ALTER TABLE current_diffs ADD COLUMN metadata_source TEXT")
+    if "local_size" not in col_names:
+        conn.execute("ALTER TABLE current_diffs ADD COLUMN local_size INTEGER")
+    if "remote_size" not in col_names:
+        conn.execute("ALTER TABLE current_diffs ADD COLUMN remote_size INTEGER")
 
     conn.execute(
         """
@@ -198,14 +204,18 @@ def save_current_state(
                     metadata_state,
                     metadata_diff_json,
                     metadata_detail_json,
-                    metadata_source
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    metadata_source,
+                    local_size,
+                    remote_size
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(relpath) DO UPDATE SET
                     content_state = excluded.content_state,
                     metadata_state = excluded.metadata_state,
                     metadata_diff_json = excluded.metadata_diff_json,
                     metadata_detail_json = excluded.metadata_detail_json,
-                    metadata_source = excluded.metadata_source
+                    metadata_source = excluded.metadata_source,
+                    local_size = excluded.local_size,
+                    remote_size = excluded.remote_size
                 """,
                 [
                     (
@@ -217,6 +227,8 @@ def save_current_state(
                         normalize_text(diff.metadata_source)
                         if diff.metadata_source is not None
                         else None,
+                        diff.local_size,
+                        diff.remote_size,
                     )
                     for diff in diffs
                 ],
@@ -259,7 +271,7 @@ def load_current_diffs(db_path: Path) -> list[dict[str, object]]:
         _init_schema(conn)
         rows = conn.execute(
             """
-            SELECT relpath, content_state, metadata_state, metadata_diff_json, metadata_detail_json, metadata_source
+            SELECT relpath, content_state, metadata_state, metadata_diff_json, metadata_detail_json, metadata_source, local_size, remote_size
             FROM current_diffs
             ORDER BY relpath
             """
@@ -272,6 +284,8 @@ def load_current_diffs(db_path: Path) -> list[dict[str, object]]:
                 "metadata_diff": json.loads(row["metadata_diff_json"]),
                 "metadata_details": json.loads(row["metadata_detail_json"] or "[]"),
                 "metadata_source": row["metadata_source"],
+                "local_size": row["local_size"],
+                "remote_size": row["remote_size"],
             }
             for row in rows
         ]
@@ -361,6 +375,25 @@ def mark_paths_identical(db_path: Path, relpaths: set[str]) -> None:
                     metadata_detail_json = '[]'
                 WHERE relpath = ?
                 """,
+                ((normalize_text(relpath),) for relpath in relpaths),
+            )
+    finally:
+        conn.close()
+
+
+def delete_paths_from_current_state(db_path: Path, relpaths: set[str]) -> None:
+    if not relpaths:
+        return
+    conn = _connect(db_path)
+    try:
+        _init_schema(conn)
+        with conn:
+            conn.executemany(
+                "DELETE FROM current_diffs WHERE relpath = ?",
+                ((normalize_text(relpath),) for relpath in relpaths),
+            )
+            conn.executemany(
+                "DELETE FROM scan_actions WHERE relpath = ?",
                 ((normalize_text(relpath),) for relpath in relpaths),
             )
     finally:

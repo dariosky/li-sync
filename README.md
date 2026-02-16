@@ -55,10 +55,13 @@ uv run li-sync review \
 ## Review UI keys
 - Arrow keys: navigate tree
 - Enter: open/close selected folder
+- `?`: show advanced Commands modal (`Up/Down` to select, `Enter` to execute)
 - `h`: show/hide completely identical folders (preference persisted in SQLite)
+- `D`: diff selected file (local vs downloaded remote) in a modal
 - `l`: left wins (applies to selected file/subtree)
 - `r`: right wins (applies to selected file/subtree)
 - `i`: ignore (applies to selected file/subtree)
+- `I`: add selected file/folder name to parent `.dropboxignore` and hide it from current review state
 - `s`: suggested planner action (applies to selected file/subtree)
 - `a`: apply current plan (press twice to confirm)
 - `q`: quit

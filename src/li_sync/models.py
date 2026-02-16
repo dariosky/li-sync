@@ -43,3 +43,5 @@ class DiffRecord:
     metadata_diff: tuple[str, ...]
     metadata_details: tuple[str, ...] = ()
     metadata_source: str | None = None
+    local_size: int | None = None
+    remote_size: int | None = None

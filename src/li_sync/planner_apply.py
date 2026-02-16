@@ -140,6 +140,12 @@ def build_plan_operations(
             elif action == ACTION_RIGHT_WINS:
                 ops.append(PlanOperation("copy_left", diff.relpath))
             # suggested => no content op for conflict/unknown
+            # For explicit different-content conflicts, also avoid metadata suggestions.
+            if (
+                diff.content_state == ContentState.DIFFERENT
+                and action == ACTION_SUGGESTED
+            ):
+                continue
 
         ops.extend(_metadata_ops(diff.relpath, action, diff))
 
@@ -313,7 +319,24 @@ def execute_plan(
                         ok = True
                     elif op.kind in {"metadata_update_left", "metadata_update_right"}:
                         lst = local_path.lstat()
-                        rst = sftp.stat(remote_path)
+                        rst = sftp.lstat(remote_path)
+                        local_is_symlink = stat.S_ISLNK(lst.st_mode)
+                        remote_is_symlink = stat.S_ISLNK(getattr(rst, "st_mode", 0))
+                        if local_is_symlink or remote_is_symlink:
+                            # Symlink metadata propagation is platform-dependent and
+                            # may fail for broken links; treat as no-op.
+                            ok = True
+                            done_count += 1
+                            succeeded.add((op.kind, op.relpath))
+                            if progress_cb is not None:
+                                progress_cb(
+                                    done_count,
+                                    total,
+                                    op,
+                                    True,
+                                    None,
+                                )
+                            continue
                         op_kinds = {item.kind for item in path_ops.get(relpath, [])}
                         has_left = "metadata_update_left" in op_kinds
                         has_right = "metadata_update_right" in op_kinds
