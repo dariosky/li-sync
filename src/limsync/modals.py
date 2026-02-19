@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -11,22 +11,23 @@ from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, ProgressBar, Static, Tree
 
+from .endpoints import EndpointSpec
 from .planner_apply import ApplySettings, ExecuteResult, PlanOperation, execute_plan
 
 
 def _op_label(kind: str) -> str:
     if kind == "copy_right":
-        return "copy local -> remote"
+        return "copy left -> right"
     if kind == "copy_left":
-        return "copy remote -> local"
+        return "copy right -> left"
     if kind == "delete_right":
-        return "delete remote"
+        return "delete right"
     if kind == "delete_left":
-        return "delete local"
+        return "delete left"
     if kind == "metadata_update_right":
-        return "copy metadata from local"
+        return "copy metadata from left"
     if kind == "metadata_update_left":
-        return "copy metadata from remote"
+        return "copy metadata from right"
     return kind
 
 
@@ -154,16 +155,16 @@ class ApplyRunModal(ModalScreen[ExecuteResult | None]):
 
     def __init__(
         self,
-        local_root: Path,
-        remote_address: str,
+        source_endpoint: EndpointSpec,
+        destination_endpoint: EndpointSpec,
         operations: list,
         apply_settings: ApplySettings | None = None,
         progress_event_cb: Callable[[int, int, object, bool, str | None], None]
         | None = None,
     ) -> None:
         super().__init__()
-        self.local_root = local_root
-        self.remote_address = remote_address
+        self.source_endpoint = source_endpoint
+        self.destination_endpoint = destination_endpoint
         self.operations = operations
         self.apply_settings = apply_settings or ApplySettings()
         self.progress_event_cb = progress_event_cb
@@ -207,8 +208,8 @@ class ApplyRunModal(ModalScreen[ExecuteResult | None]):
         try:
             result = await asyncio.to_thread(
                 execute_plan,
-                self.local_root,
-                self.remote_address,
+                self.source_endpoint,
+                self.destination_endpoint,
                 self.operations,
                 progress_cb,
                 self.apply_settings,
@@ -414,7 +415,7 @@ class FileDiffModal(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         with Container(id="diff-root"):
             with Vertical(id="diff-box"):
-                yield Static(f"Diff: local vs remote\n{self.relpath}", id="diff-title")
+                yield Static(f"Diff: left vs right\n{self.relpath}", id="diff-title")
                 yield Static(Text(self.diff_text), id="diff-content")
                 with Container(id="diff-close-row"):
                     yield Button("Close", id="close")

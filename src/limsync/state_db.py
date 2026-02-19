@@ -11,15 +11,15 @@ from .text_utils import normalize_text
 
 @dataclass(frozen=True)
 class ScanStateSummary:
-    local_root: str
-    remote_address: str
-    local_scan_seconds: float
-    remote_scan_seconds: float
-    local_files: int
-    remote_files: int
+    source_endpoint: str
+    destination_endpoint: str
+    source_scan_seconds: float
+    destination_scan_seconds: float
+    source_files: int
+    destination_files: int
     compared_paths: int
-    only_local: int
-    only_remote: int
+    only_source: int
+    only_destination: int
     different_content: int
     uncertain: int
     metadata_only: int
@@ -27,8 +27,8 @@ class ScanStateSummary:
 
 @dataclass(frozen=True)
 class StateContext:
-    local_root: str
-    remote_address: str
+    source_endpoint: str
+    destination_endpoint: str
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -48,6 +48,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             local_root TEXT NOT NULL,
             remote_address TEXT NOT NULL,
+            source_endpoint TEXT,
+            destination_endpoint TEXT,
             local_scan_seconds REAL NOT NULL,
             remote_scan_seconds REAL NOT NULL,
             local_files INTEGER NOT NULL,
@@ -96,6 +98,13 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE current_diffs ADD COLUMN local_size INTEGER")
     if "remote_size" not in col_names:
         conn.execute("ALTER TABLE current_diffs ADD COLUMN remote_size INTEGER")
+
+    meta_cols = conn.execute("PRAGMA table_info(state_meta)").fetchall()
+    meta_col_names = {str(col["name"]) for col in meta_cols}
+    if "source_endpoint" not in meta_col_names:
+        conn.execute("ALTER TABLE state_meta ADD COLUMN source_endpoint TEXT")
+    if "destination_endpoint" not in meta_col_names:
+        conn.execute("ALTER TABLE state_meta ADD COLUMN destination_endpoint TEXT")
 
     conn.execute(
         """
@@ -152,6 +161,8 @@ def save_current_state(
                     singleton_id,
                     local_root,
                     remote_address,
+                    source_endpoint,
+                    destination_endpoint,
                     local_scan_seconds,
                     remote_scan_seconds,
                     local_files,
@@ -163,10 +174,12 @@ def save_current_state(
                     uncertain,
                     metadata_only,
                     updated_at
-                ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(singleton_id) DO UPDATE SET
                     local_root = excluded.local_root,
                     remote_address = excluded.remote_address,
+                    source_endpoint = excluded.source_endpoint,
+                    destination_endpoint = excluded.destination_endpoint,
                     local_scan_seconds = excluded.local_scan_seconds,
                     remote_scan_seconds = excluded.remote_scan_seconds,
                     local_files = excluded.local_files,
@@ -180,15 +193,17 @@ def save_current_state(
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 (
-                    normalize_text(summary.local_root),
-                    normalize_text(summary.remote_address),
-                    summary.local_scan_seconds,
-                    summary.remote_scan_seconds,
-                    summary.local_files,
-                    summary.remote_files,
+                    normalize_text(summary.source_endpoint),
+                    normalize_text(summary.destination_endpoint),
+                    normalize_text(summary.source_endpoint),
+                    normalize_text(summary.destination_endpoint),
+                    summary.source_scan_seconds,
+                    summary.destination_scan_seconds,
+                    summary.source_files,
+                    summary.destination_files,
                     summary.compared_paths,
-                    summary.only_local,
-                    summary.only_remote,
+                    summary.only_source,
+                    summary.only_destination,
                     summary.different_content,
                     summary.uncertain,
                     summary.metadata_only,
@@ -253,13 +268,19 @@ def get_state_context(db_path: Path) -> StateContext | None:
     try:
         _init_schema(conn)
         row = conn.execute(
-            "SELECT local_root, remote_address FROM state_meta WHERE singleton_id = 1"
+            """
+            SELECT
+                COALESCE(source_endpoint, local_root) AS source_endpoint,
+                COALESCE(destination_endpoint, remote_address) AS destination_endpoint
+            FROM state_meta
+            WHERE singleton_id = 1
+            """
         ).fetchone()
         if row is None:
             return None
         return StateContext(
-            local_root=str(row["local_root"]),
-            remote_address=str(row["remote_address"]),
+            source_endpoint=str(row["source_endpoint"]),
+            destination_endpoint=str(row["destination_endpoint"]),
         )
     finally:
         conn.close()

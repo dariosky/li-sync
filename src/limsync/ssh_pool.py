@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
+import paramiko
+
 
 @dataclass
 class _PoolEntry:
@@ -52,8 +54,8 @@ def pooled_ssh_client(
     port: int,
     compress: bool,
     timeout: int = 10,
-    client_factory: Callable[[], Any],
-    auto_add_policy_factory: Callable[[], Any],
+    client_factory: Callable[[], Any] = paramiko.SSHClient,
+    auto_add_policy_factory: Callable[[], Any] = paramiko.AutoAddPolicy,
 ) -> Iterator[Any]:
     key = (
         host,

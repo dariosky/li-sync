@@ -10,16 +10,14 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from .compare import compare_records
-from .config import (
-    DEFAULT_LOCAL_ROOT,
-    DEFAULT_REMOTE_HOST,
-    DEFAULT_REMOTE_PORT,
-    DEFAULT_REMOTE_ROOT,
-    DEFAULT_REMOTE_USER,
-    DEFAULT_STATE_SUBPATH,
-    RemoteConfig,
+from .config import RemoteConfig
+from .endpoints import (
+    EndpointSpec,
+    default_endpoint_state_db,
+    default_review_db_path,
+    endpoint_to_string,
+    parse_endpoint,
 )
-from .excludes import load_ignore_rules_tree
 from .models import ContentState, FileRecord, MetadataState
 from .planner_apply import ApplySettings
 from .review_tui import run_review_tui
@@ -88,70 +86,31 @@ def _format_seconds(seconds: float) -> str:
     return f"{seconds:.2f}s"
 
 
-def _local_state_db_path(local_root: Path) -> Path:
-    return local_root / Path(DEFAULT_STATE_SUBPATH)
+def _endpoint_root_name(endpoint: EndpointSpec) -> str:
+    root = Path(endpoint.root)
+    name = root.name or endpoint.root
+    prefix = "remote:" if endpoint.is_remote else "local:"
+    return f"{prefix}{name}"
 
 
-def _remote_state_db_path(remote_root: str) -> str:
-    return f"{remote_root.rstrip('/')}/{DEFAULT_STATE_SUBPATH}"
-
-
-@app.callback()
-def _default_command(ctx: typer.Context) -> None:
-    """Run `scan` when no subcommand is provided."""
-    if ctx.invoked_subcommand is None:
-        ctx.invoke(
-            scan,
-            local_root=DEFAULT_LOCAL_ROOT,
-            remote_host=DEFAULT_REMOTE_HOST,
-            remote_user=DEFAULT_REMOTE_USER,
-            remote_port=DEFAULT_REMOTE_PORT,
-            remote_root=DEFAULT_REMOTE_ROOT,
-            local_state_db=None,
-            remote_state_db=None,
-            open_review=True,
-        )
-
-
-@app.command()
-def scan(
-    local_root: Path = typer.Option(DEFAULT_LOCAL_ROOT, help="Local root folder"),
-    remote_host: str = typer.Option(DEFAULT_REMOTE_HOST, help="Remote SSH host"),
-    remote_user: str = typer.Option(DEFAULT_REMOTE_USER, help="Remote SSH user"),
-    remote_port: int = typer.Option(DEFAULT_REMOTE_PORT, help="Remote SSH port"),
-    remote_root: str = typer.Option(DEFAULT_REMOTE_ROOT, help="Remote root folder"),
-    local_state_db: Path | None = typer.Option(
-        None,
-        help="Local SQLite path for scan status (default: <local_root>/.limsync/state.sqlite3)",
-    ),
-    remote_state_db: str | None = typer.Option(
-        None,
-        help="Remote SQLite path for scan status (default: <remote_root>/.limsync/state.sqlite3)",
-    ),
-    open_review: bool = typer.Option(
-        True,
-        help="Open interactive review UI after scan",
-    ),
-    apply_ssh_compression: bool = typer.Option(
-        False,
-        "--apply-ssh-compression/--no-apply-ssh-compression",
-        help="Enable SSH transport compression during apply operations in the review UI.",
-    ),
+def _run_scan(
+    source: str,
+    destination: str,
+    state_db: Path | None,
+    open_review: bool,
+    apply_ssh_compression: bool,
 ) -> None:
-    """Scan local and remote trees, store run status, and open review UI."""
-    local_root = local_root.expanduser().resolve()
-    local_db_path = (
-        local_state_db.expanduser().resolve()
-        if local_state_db is not None
-        else _local_state_db_path(local_root)
-    )
-    remote_db_path = remote_state_db or _remote_state_db_path(remote_root)
-    remote_cfg = RemoteConfig(
-        host=remote_host,
-        user=remote_user,
-        port=remote_port,
-        root=remote_root,
-        state_db=remote_db_path,
+    try:
+        source_endpoint = parse_endpoint(source)
+        destination_endpoint = parse_endpoint(destination)
+    except ValueError as exc:
+        console.print(f"[red]Invalid endpoint:[/red] {exc}")
+        raise typer.Exit(1)
+
+    review_db_path = (
+        state_db.expanduser().resolve()
+        if state_db is not None
+        else default_review_db_path(source_endpoint, destination_endpoint)
     )
 
     with Progress(
@@ -160,86 +119,86 @@ def scan(
         console=console,
     ) as progress:
         progress_lock = threading.Lock()
-        local_task = progress.add_task("Preparing local scan...", total=None)
-        remote_task = progress.add_task(
-            f"Preparing remote scan ({remote_cfg.address})...",
-            total=None,
+        source_task = progress.add_task("Preparing source scan...", total=None)
+        destination_task = progress.add_task(
+            "Preparing destination scan...", total=None
         )
-        local_reporter = ScanProgressReporter(
+        source_reporter = ScanProgressReporter(
             progress,
-            local_task,
-            local_root.name or str(local_root),
+            source_task,
+            _endpoint_root_name(source_endpoint),
             progress_lock,
         )
-        remote_label = f"remote:{Path(remote_cfg.root).name or remote_cfg.root}"
-        remote_reporter = ScanProgressReporter(
-            progress, remote_task, remote_label, progress_lock
+        destination_reporter = ScanProgressReporter(
+            progress,
+            destination_task,
+            _endpoint_root_name(destination_endpoint),
+            progress_lock,
         )
 
-        def run_local_scan() -> tuple[dict[str, FileRecord], float]:
+        def run_scan(
+            endpoint: EndpointSpec,
+            reporter: ScanProgressReporter,
+        ) -> tuple[dict[str, FileRecord], float]:
             started = time.perf_counter()
-            records = LocalScanner(local_root).scan(progress_cb=local_reporter.update)
+            if endpoint.is_local:
+                records = LocalScanner(Path(endpoint.root)).scan(
+                    progress_cb=reporter.update
+                )
+            else:
+                records = RemoteScanner(
+                    RemoteConfig(
+                        host=str(endpoint.host),
+                        user=str(endpoint.user),
+                        port=endpoint.port or 22,
+                        root=endpoint.root,
+                        state_db=default_endpoint_state_db(endpoint),
+                    )
+                ).scan(progress_cb=reporter.update)
             return records, (time.perf_counter() - started)
 
-        def run_remote_scan() -> tuple[dict[str, FileRecord], float]:
-            started = time.perf_counter()
-            records = RemoteScanner(remote_cfg).scan(progress_cb=remote_reporter.update)
-            return records, (time.perf_counter() - started)
-
-        local_records: dict[str, FileRecord]
-        remote_records: dict[str, FileRecord]
-        local_elapsed = 0.0
-        remote_elapsed = 0.0
+        source_records: dict[str, FileRecord]
+        destination_records: dict[str, FileRecord]
+        source_elapsed = 0.0
+        destination_elapsed = 0.0
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            future_local = pool.submit(run_local_scan)
-            future_remote = pool.submit(run_remote_scan)
+            future_source = pool.submit(run_scan, source_endpoint, source_reporter)
+            future_destination = pool.submit(
+                run_scan, destination_endpoint, destination_reporter
+            )
 
             try:
-                local_records, local_elapsed = future_local.result()
+                source_records, source_elapsed = future_source.result()
             except Exception as exc:
                 progress.stop()
-                console.print(f"[red]Local scan failed:[/red] {exc}")
+                console.print(f"[red]Source scan failed:[/red] {exc}")
                 raise typer.Exit(1)
 
             try:
-                remote_records, remote_elapsed = future_remote.result()
+                destination_records, destination_elapsed = future_destination.result()
             except Exception as exc:
                 progress.stop()
-                console.print(f"[red]Remote scan failed:[/red] {exc}")
+                console.print(f"[red]Destination scan failed:[/red] {exc}")
                 raise typer.Exit(1)
 
         with progress_lock:
             progress.update(
-                local_task,
+                source_task,
                 description=(
-                    f"Local scan completed  files={len(local_records)}  "
-                    f"time={_format_seconds(local_elapsed)}"
+                    f"Source scan completed  files={len(source_records)}  "
+                    f"time={_format_seconds(source_elapsed)}"
                 ),
             )
             progress.update(
-                remote_task,
+                destination_task,
                 description=(
-                    f"Remote scan completed  files={len(remote_records)}  "
-                    f"time={_format_seconds(remote_elapsed)}"
+                    f"Destination scan completed  files={len(destination_records)}  "
+                    f"time={_format_seconds(destination_elapsed)}"
                 ),
             )
 
-    # Apply local ignore policy to both sides before comparison, so excluded
-    # paths don't show up as one-sided diffs.
-    local_ignore_rules = load_ignore_rules_tree(local_root)
-    local_records = {
-        relpath: record
-        for relpath, record in local_records.items()
-        if not local_ignore_rules.is_ignored(PurePosixPath(relpath), is_dir=False)
-    }
-    remote_records = {
-        relpath: record
-        for relpath, record in remote_records.items()
-        if not local_ignore_rules.is_ignored(PurePosixPath(relpath), is_dir=False)
-    }
-
-    diffs = compare_records(local_records, remote_records)
+    diffs = compare_records(source_records, destination_records)
 
     counts = {
         ContentState.ONLY_LOCAL: 0,
@@ -257,56 +216,98 @@ def scan(
             and diff.metadata_state == MetadataState.DIFFERENT
         ):
             metadata_only += 1
+
     run_summary = ScanStateSummary(
-        local_root=str(local_root),
-        remote_address=remote_cfg.address,
-        local_scan_seconds=local_elapsed,
-        remote_scan_seconds=remote_elapsed,
-        local_files=len(local_records),
-        remote_files=len(remote_records),
+        source_endpoint=endpoint_to_string(source_endpoint),
+        destination_endpoint=endpoint_to_string(destination_endpoint),
+        source_scan_seconds=source_elapsed,
+        destination_scan_seconds=destination_elapsed,
+        source_files=len(source_records),
+        destination_files=len(destination_records),
         compared_paths=len(diffs),
-        only_local=counts[ContentState.ONLY_LOCAL],
-        only_remote=counts[ContentState.ONLY_REMOTE],
+        only_source=counts[ContentState.ONLY_LOCAL],
+        only_destination=counts[ContentState.ONLY_REMOTE],
         different_content=counts[ContentState.DIFFERENT],
         uncertain=counts[ContentState.UNKNOWN],
         metadata_only=metadata_only,
     )
-    save_current_state(local_db_path, run_summary, diffs)
+    save_current_state(review_db_path, run_summary, diffs)
 
     console.print()
-    console.print(f"Local files: {len(local_records)}")
-    console.print(f"Remote files: {len(remote_records)}")
+    console.print(f"Source files: {len(source_records)}")
+    console.print(f"Destination files: {len(destination_records)}")
     console.print(f"Compared paths: {len(diffs)}")
-    console.print(f"Only local: {counts[ContentState.ONLY_LOCAL]}")
-    console.print(f"Only remote: {counts[ContentState.ONLY_REMOTE]}")
+    console.print(f"Only source: {counts[ContentState.ONLY_LOCAL]}")
+    console.print(f"Only destination: {counts[ContentState.ONLY_REMOTE]}")
     console.print(f"Different content: {counts[ContentState.DIFFERENT]}")
     console.print(f"Uncertain (same size, mtime drift): {counts[ContentState.UNKNOWN]}")
     console.print(f"Metadata-only drift: {metadata_only}")
+    console.print(f"Review DB: {review_db_path}")
+
     if open_review:
-        pref_value = get_ui_pref(local_db_path, "review.hide_identical", "1")
+        pref_value = get_ui_pref(review_db_path, "review.hide_identical", "1")
         resolved_hide_identical = pref_value != "0"
         run_review_tui(
-            db_path=local_db_path,
-            local_root=local_root,
-            remote_address=remote_cfg.address,
+            db_path=review_db_path,
+            source_endpoint=source_endpoint,
+            destination_endpoint=destination_endpoint,
             hide_identical=resolved_hide_identical,
             apply_settings=ApplySettings(ssh_compression=apply_ssh_compression),
         )
     else:
+        console.print("Run `limsync review --state-db <db_path>` to inspect changes.")
+
+
+@app.callback()
+def _default_command(
+    ctx: typer.Context,
+    source: str | None = typer.Option(
+        None,
+        help="Source endpoint (local path, local:/path, ssh://user@host/path, or user@host:path)",
+    ),
+    destination: str | None = typer.Option(
+        None,
+        help="Destination endpoint (local path, local:/path, ssh://user@host/path, or user@host:path)",
+    ),
+    state_db: Path | None = typer.Option(
+        None,
+        help="Local SQLite path for review state (default: ~/.limsync/<source>__<destination>.sqlite3)",
+    ),
+    open_review: bool = typer.Option(
+        True,
+        help="Open interactive review UI after scan",
+    ),
+    apply_ssh_compression: bool = typer.Option(
+        False,
+        "--apply-ssh-compression/--no-apply-ssh-compression",
+        help="Enable SSH transport compression during apply operations in the review UI.",
+    ),
+) -> None:
+    """Run scan when no subcommand is provided."""
+    if ctx.invoked_subcommand is not None:
+        return
+    if source is None or destination is None:
         console.print(
-            "Run `limsync review` to inspect changes in the interactive tree UI."
+            "[red]Missing required options.[/red] Use `--source` and `--destination`."
         )
+        console.print(ctx.get_help())
+        raise typer.Exit(2)
+    _run_scan(source, destination, state_db, open_review, apply_ssh_compression)
 
 
 @app.command()
 def review(
-    local_root: Path = typer.Option(
-        DEFAULT_LOCAL_ROOT,
-        help="Local root folder; used for default DB location",
-    ),
-    db_path: Path | None = typer.Option(
+    state_db: Path | None = typer.Option(
         None,
-        help="Path to local SQLite status DB (default: <local_root>/.limsync/state.sqlite3)",
+        help="Path to local SQLite review DB",
+    ),
+    source: str | None = typer.Option(
+        None,
+        help="Source endpoint used to infer default --state-db when omitted",
+    ),
+    destination: str | None = typer.Option(
+        None,
+        help="Destination endpoint used to infer default --state-db when omitted",
     ),
     hide_identical: bool | None = typer.Option(
         None,
@@ -319,12 +320,22 @@ def review(
     ),
 ) -> None:
     """Open interactive tree review UI for the current saved scan state."""
-    resolved_local_root = local_root.expanduser().resolve()
-    resolved_db = (
-        db_path.expanduser().resolve()
-        if db_path is not None
-        else _local_state_db_path(resolved_local_root)
-    )
+    if state_db is not None:
+        resolved_db = state_db.expanduser().resolve()
+    else:
+        if source is None or destination is None:
+            console.print(
+                "[red]Missing review DB.[/red] Provide --state-db, or both --source and --destination."
+            )
+            raise typer.Exit(1)
+        try:
+            source_endpoint = parse_endpoint(source)
+            destination_endpoint = parse_endpoint(destination)
+        except ValueError as exc:
+            console.print(f"[red]Invalid endpoint:[/red] {exc}")
+            raise typer.Exit(1)
+        resolved_db = default_review_db_path(source_endpoint, destination_endpoint)
+
     if not resolved_db.exists():
         console.print(f"[red]State DB not found:[/red] {resolved_db}")
         raise typer.Exit(1)
@@ -332,6 +343,13 @@ def review(
     context = get_state_context(resolved_db)
     if context is None:
         console.print("No scan state recorded yet. Run `limsync scan` first.")
+        raise typer.Exit(1)
+
+    try:
+        source_endpoint = parse_endpoint(context.source_endpoint)
+        destination_endpoint = parse_endpoint(context.destination_endpoint)
+    except ValueError as exc:
+        console.print(f"[red]Invalid state context:[/red] {exc}")
         raise typer.Exit(1)
 
     if hide_identical is None:
@@ -342,8 +360,8 @@ def review(
 
     run_review_tui(
         db_path=resolved_db,
-        local_root=resolved_local_root,
-        remote_address=context.remote_address,
+        source_endpoint=source_endpoint,
+        destination_endpoint=destination_endpoint,
         hide_identical=resolved_hide_identical,
         apply_settings=ApplySettings(ssh_compression=apply_ssh_compression),
     )

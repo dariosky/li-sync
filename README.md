@@ -31,29 +31,37 @@ uv sync
 
 ```bash
 uv run limsync --help
-uv run limsync scan
-uv run limsync review
+uv run limsync --source local:/path/to/source --destination user@host:/path/to/destination
+uv run limsync review --source local:/path/to/source --destination user@host:/path/to/destination
 ```
 
 ### Useful scan overrides
 
 ```bash
-uv run limsync scan \
-  --local-root /Users/dario.varotto/Dropbox \
-  --remote-user dario \
-  --remote-host 192.168.18.18 \
-  --remote-root '~/Dropbox'
+uv run limsync \
+  --source local:/path/to/source \
+  --destination ssh://user@example-host/path/to/destination
 
 # Scan without opening the review UI immediately
-uv run limsync scan --no-open-review
+uv run limsync \
+  --source /path/to/source \
+  --destination user@example-host:~/path/to/destination \
+  --no-open-review
 
 # Enable SSH compression during apply operations in the review UI
-uv run limsync scan --apply-ssh-compression
-
-# Review from local SQLite state
-uv run limsync review \
-  --local-root /Users/dario.varotto/Dropbox \
+uv run limsync \
+  --source local:/path/to/source \
+  --destination /path/to/destination \
   --apply-ssh-compression
+
+# Review by inferred state DB (~/.limsync/<source>__<destination>.sqlite3)
+uv run limsync review \
+  --source local:/path/to/source \
+  --destination ssh://user@example-host/path/to/destination \
+  --apply-ssh-compression
+
+# Or review from an explicit DB path
+uv run limsync review --state-db ~/.limsync/some_pair.sqlite3
 ```
 
 ## Review UI keys
@@ -64,7 +72,7 @@ uv run limsync review \
 - `V`: view current plan as grouped action tree (copy/metadata/delete categories)
 - `h`: show/hide completely identical folders (preference persisted in SQLite)
 - `D`: delete selected file/folder on both sides (with confirmation)
-- `F`: diff selected file (local vs downloaded remote) in a modal
+- `F`: diff selected file (left vs right) in a modal
 - `l`: left wins (applies to selected file/subtree)
 - `r`: right wins (applies to selected file/subtree)
 - `i`: ignore (applies to selected file/subtree)
@@ -77,8 +85,8 @@ uv run limsync review \
 - Default action is `ignore` (do nothing) until you assign actions.
 - Plan summary shows operation counts:
   - delete left/right
-  - copy left/right
-  - metadata updates left/right
+  - copy left->right and right->left
+  - metadata updates left<->right
 - `a` is disabled when total planned operations is zero.
 - Applying opens:
   - confirmation modal (`A` apply / `C` cancel)

@@ -8,7 +8,6 @@ import pytest
 
 from limsync.models import ContentState, MetadataState
 from limsync.planner_apply import (
-    ACTION_IGNORE,
     ACTION_LEFT_WINS,
     ACTION_RIGHT_WINS,
     ACTION_SUGGESTED,

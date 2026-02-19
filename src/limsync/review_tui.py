@@ -7,20 +7,19 @@ import tempfile
 import unicodedata
 from pathlib import Path, PurePosixPath
 
-import paramiko
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingsMap
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer, Header, Static, Tree
 
-from .config import DEFAULT_STATE_SUBPATH, RemoteConfig
+from .config import RemoteConfig
+from .endpoints import EndpointSpec, default_endpoint_state_db
 from .models import ContentState, DiffRecord, FileRecord, MetadataState
 from .planner_apply import (
     ACTION_IGNORE,
     ACTION_SUGGESTED,
     ApplySettings,
     build_plan_operations,
-    parse_remote_address,
     summarize_operations,
 )
 from .review_actions import ReviewActionsMixin
@@ -48,17 +47,17 @@ from .tree_builder import (
 
 def _op_label(kind: str) -> str:
     if kind == "copy_right":
-        return "copy local -> remote"
+        return "copy left -> right"
     if kind == "copy_left":
-        return "copy remote -> local"
+        return "copy right -> left"
     if kind == "delete_right":
-        return "delete remote"
+        return "delete right"
     if kind == "delete_left":
-        return "delete local"
+        return "delete left"
     if kind == "metadata_update_right":
-        return "copy metadata from local"
+        return "copy metadata from left"
     if kind == "metadata_update_left":
-        return "copy metadata from remote"
+        return "copy metadata from right"
     return kind
 
 
@@ -95,7 +94,7 @@ def _suggested_action_with_reason(entry: FileEntry, suggested_ops: list[str]) ->
     if primary not in {"metadata_update_left", "metadata_update_right"}:
         return _ops_text(suggested_ops)
 
-    source = "local" if primary == "metadata_update_right" else "remote"
+    source = "left" if primary == "metadata_update_right" else "right"
     parsed = _parse_metadata_details(entry.metadata_details)
     if "mode" in entry.metadata_diff and parsed.get("mode_local") != parsed.get(
         "mode_remote"
@@ -182,15 +181,15 @@ class ReviewApp(ReviewActionsMixin, App[None]):
     def __init__(
         self,
         db_path: Path,
-        local_root: Path,
-        remote_address: str,
+        source_endpoint: EndpointSpec,
+        destination_endpoint: EndpointSpec,
         hide_identical: bool,
         apply_settings: ApplySettings | None = None,
     ) -> None:
         super().__init__()
         self.db_path = db_path
-        self.local_root = local_root
-        self.remote_address = remote_address
+        self.source_endpoint = source_endpoint
+        self.destination_endpoint = destination_endpoint
         self.hide_identical = hide_identical
         self.apply_settings = apply_settings or ApplySettings()
         self.status_message = ""
@@ -213,7 +212,7 @@ class ReviewApp(ReviewActionsMixin, App[None]):
             self.files_by_relpath,
             self.dir_files_map,
             self.diffs_by_relpath,
-        ) = _build_model(rows, self.local_root.name or str(self.local_root))
+        ) = _build_model(rows, Path(self.source_endpoint.root).name or "source")
         self.diffs = list(self.diffs_by_relpath.values())
 
     def compose(self) -> ComposeResult:
@@ -419,28 +418,22 @@ class ReviewApp(ReviewActionsMixin, App[None]):
         self, scope_relpath: str, scope_is_dir: bool
     ) -> tuple[dict[str, FileRecord], dict[str, FileRecord]]:
         subtree = PurePosixPath(scope_relpath)
-        local_records = LocalScanner(self.local_root).scan(subtree=subtree)
-        user, host, remote_root = parse_remote_address(self.remote_address)
-        remote_records = RemoteScanner(
-            RemoteConfig(
-                host=host,
-                user=user,
-                root=remote_root,
-                state_db=f"{remote_root.rstrip('/')}/{DEFAULT_STATE_SUBPATH}",
-            )
-        ).scan(subtree=subtree)
+        source_records = self._scan_endpoint_records(self.source_endpoint, subtree)
+        destination_records = self._scan_endpoint_records(
+            self.destination_endpoint, subtree
+        )
 
-        scoped_local = {
+        scoped_source = {
             relpath: record
-            for relpath, record in local_records.items()
+            for relpath, record in source_records.items()
             if self._scope_match(relpath, scope_relpath, scope_is_dir)
         }
-        scoped_remote = {
+        scoped_destination = {
             relpath: record
-            for relpath, record in remote_records.items()
+            for relpath, record in destination_records.items()
             if self._scope_match(relpath, scope_relpath, scope_is_dir)
         }
-        return scoped_local, scoped_remote
+        return scoped_source, scoped_destination
 
     def _replace_scope_with_diffs(
         self, scope_relpath: str, scope_is_dir: bool, scoped_diffs: list[DiffRecord]
@@ -476,13 +469,12 @@ class ReviewApp(ReviewActionsMixin, App[None]):
         lines = [
             f"Folder: {entry.relpath}",
             "",
-            f"Only local: {c.only_local}",
-            f"Only remote: {c.only_remote}",
-            f"Identical: {c.identical}",
-            f"Metadata-only: {c.metadata_only}",
-            f"Metadata fields: {meta_fields}",
+            f"Only left: {c.only_local}",
+            f"Only right: {c.only_remote}",
             f"Different: {c.different}",
-            f"Uncertain: {c.uncertain}",
+            f"Metadata: {c.metadata_only + c.uncertain}",
+            f"Metadata fields: {meta_fields}",
+            f"Identical: {c.identical}",
             "",
             f"Hide identical folders: {'ON' if self.hide_identical else 'OFF'}",
             "Actions: ?=commands l=left wins r=right wins i=ignore s=suggested",
@@ -500,23 +492,23 @@ class ReviewApp(ReviewActionsMixin, App[None]):
                 lines.append(f"Size: {entry.local_size:,} bytes")
             else:
                 lines.append(
-                    f"Size: local={entry.local_size:,} bytes remote={entry.remote_size:,} bytes"
+                    f"Size: left={entry.local_size:,} bytes right={entry.remote_size:,} bytes"
                 )
         elif entry.local_size is not None:
-            lines.append(f"Size: local={entry.local_size:,} bytes")
+            lines.append(f"Size: left={entry.local_size:,} bytes")
         elif entry.remote_size is not None:
-            lines.append(f"Size: remote={entry.remote_size:,} bytes")
+            lines.append(f"Size: right={entry.remote_size:,} bytes")
         if entry.content_state not in {"identical", "unknown"}:
             lines.append(f"Content state: {entry.content_state}")
         if entry.metadata_state == "different":
             parsed = _parse_metadata_details(entry.metadata_details)
             if parsed.get("mode_local") != parsed.get("mode_remote"):
                 lines.append(
-                    f"Permissions: local={parsed.get('mode_local', '?')} remote={parsed.get('mode_remote', '?')}"
+                    f"Permissions: left={parsed.get('mode_local', '?')} right={parsed.get('mode_remote', '?')}"
                 )
             if parsed.get("mtime_local") != parsed.get("mtime_remote"):
                 lines.append(
-                    f"MTime: local={parsed.get('mtime_local', '?')} remote={parsed.get('mtime_remote', '?')}"
+                    f"MTime: left={parsed.get('mtime_local', '?')} right={parsed.get('mtime_remote', '?')}"
                 )
         lines.extend(
             [
@@ -572,32 +564,58 @@ class ReviewApp(ReviewActionsMixin, App[None]):
             candidates.append(nfd)
         return candidates
 
-    def _download_remote_file(self, relpath: str) -> Path:
-        user, host, remote_root = parse_remote_address(self.remote_address)
+    def _scan_endpoint_records(
+        self, endpoint: EndpointSpec, subtree: PurePosixPath
+    ) -> dict[str, FileRecord]:
+        if endpoint.is_local:
+            return LocalScanner(Path(endpoint.root)).scan(subtree=subtree)
+        return RemoteScanner(
+            RemoteConfig(
+                host=str(endpoint.host),
+                user=str(endpoint.user),
+                port=endpoint.port or 22,
+                root=endpoint.root,
+                state_db=default_endpoint_state_db(endpoint),
+            )
+        ).scan(subtree=subtree)
+
+    def _download_endpoint_file(self, endpoint: EndpointSpec, relpath: str) -> Path:
         if self._open_temp_dir is None:
             self._open_temp_dir = Path(tempfile.mkdtemp(prefix="limsync-open-"))
         target = self._open_temp_dir / relpath
         target.parent.mkdir(parents=True, exist_ok=True)
 
+        if endpoint.is_local:
+            last_error: Exception | None = None
+            for rel_candidate in self._candidate_relpaths(relpath):
+                source_path = Path(endpoint.root) / rel_candidate
+                try:
+                    target.write_bytes(source_path.read_bytes())
+                    return target
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+                    continue
+            if last_error is not None:
+                raise last_error
+            raise FileNotFoundError(relpath)
+
         with pooled_ssh_client(
-            host=host,
-            user=user,
-            port=22,
+            host=str(endpoint.host),
+            user=str(endpoint.user),
+            port=endpoint.port or 22,
             compress=self.apply_settings.ssh_compression,
             timeout=10,
-            client_factory=paramiko.SSHClient,
-            auto_add_policy_factory=paramiko.AutoAddPolicy,
         ) as client:
             sftp = client.open_sftp()
             try:
                 # Expand ~ on remote shell, then resolve via SFTP.
-                quoted = remote_root.replace("'", "'\\''")
+                quoted = endpoint.root.replace("'", "'\\''")
                 _stdin, stdout, _stderr = client.exec_command(
                     f"python3 -c \"import os; print(os.path.expanduser('{quoted}'))\""
                 )
                 expanded = (
                     stdout.read().decode("utf-8", errors="replace").strip()
-                    or remote_root
+                    or endpoint.root
                 )
                 remote_root_abs = sftp.normalize(expanded)
 
@@ -629,13 +647,15 @@ class ReviewApp(ReviewActionsMixin, App[None]):
     def _open_file_side(self, relpath: str, side: str) -> None:
         try:
             if side == "left":
-                path = self.local_root / relpath
-                self._open_with_default_app(path)
-                self._notify_message(f"Opened local file: {relpath}")
-            else:
-                downloaded = self._download_remote_file(relpath)
+                downloaded = self._download_endpoint_file(self.source_endpoint, relpath)
                 self._open_with_default_app(downloaded)
-                self._notify_message(f"Opened remote file: {relpath}")
+                self._notify_message(f"Opened left file: {relpath}")
+            else:
+                downloaded = self._download_endpoint_file(
+                    self.destination_endpoint, relpath
+                )
+                self._open_with_default_app(downloaded)
+                self._notify_message(f"Opened right file: {relpath}")
         except Exception as exc:  # noqa: BLE001
             self._notify_message(f"Open failed: {exc}", severity="error")
 
@@ -663,13 +683,13 @@ class ReviewApp(ReviewActionsMixin, App[None]):
         if summary.delete_right:
             lines.append(f"delete right: {summary.delete_right}")
         if summary.copy_left:
-            lines.append(f"copy left: {summary.copy_left}")
+            lines.append(f"copy right -> left: {summary.copy_left}")
         if summary.copy_right:
-            lines.append(f"copy right: {summary.copy_right}")
+            lines.append(f"copy left -> right: {summary.copy_right}")
         if summary.metadata_update_left:
-            lines.append(f"metadata updates left: {summary.metadata_update_left}")
+            lines.append(f"metadata right -> left: {summary.metadata_update_left}")
         if summary.metadata_update_right:
-            lines.append(f"metadata updates right: {summary.metadata_update_right}")
+            lines.append(f"metadata left -> right: {summary.metadata_update_right}")
         if summary.total == 0:
             lines.append("no operations planned")
         else:
@@ -823,15 +843,15 @@ class ReviewApp(ReviewActionsMixin, App[None]):
 
 def run_review_tui(
     db_path: Path,
-    local_root: Path,
-    remote_address: str,
+    source_endpoint: EndpointSpec,
+    destination_endpoint: EndpointSpec,
     hide_identical: bool,
     apply_settings: ApplySettings | None = None,
 ) -> None:
     app = ReviewApp(
         db_path=db_path,
-        local_root=local_root,
-        remote_address=remote_address,
+        source_endpoint=source_endpoint,
+        destination_endpoint=destination_endpoint,
         hide_identical=hide_identical,
         apply_settings=apply_settings,
     )

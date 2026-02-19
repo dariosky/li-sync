@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import difflib
 import platform
+import posixpath
 import shutil
 import subprocess
 from pathlib import Path, PurePosixPath
@@ -29,6 +30,7 @@ from .planner_apply import (
     build_plan_operations,
     summarize_operations,
 )
+from .ssh_pool import pooled_ssh_client
 from .state_db import (
     clear_action_overrides,
     delete_paths_from_current_state,
@@ -66,8 +68,8 @@ class ReviewActionsMixin:
 
         self.push_screen(
             ApplyRunModal(
-                local_root=self.local_root,
-                remote_address=self.remote_address,
+                source_endpoint=self.source_endpoint,
+                destination_endpoint=self.destination_endpoint,
                 operations=self._pending_apply_ops,
                 apply_settings=self.apply_settings,
                 progress_event_cb=self._on_apply_progress,
@@ -197,22 +199,73 @@ class ReviewActionsMixin:
         *,
         is_dir: bool,
     ) -> bool:
-        parent_path = (
-            self.local_root
-            if parent_relpath == "."
-            else self.local_root / PurePosixPath(parent_relpath)
-        )
-        ignore_path = parent_path / ".dropboxignore"
         rule = f"{rule_name}/" if is_dir else rule_name
         existing_aliases = {rule}
         if is_dir:
             existing_aliases.add(rule_name)
 
-        if ignore_path.exists():
-            content = ignore_path.read_text(encoding="utf-8")
+        if self.source_endpoint.is_local:
+            source_root = Path(self.source_endpoint.root)
+            parent_path = (
+                source_root
+                if parent_relpath == "."
+                else source_root / PurePosixPath(parent_relpath)
+            )
+            ignore_path = parent_path / ".dropboxignore"
+            if ignore_path.exists():
+                content = ignore_path.read_text(encoding="utf-8")
+            else:
+                parent_path.mkdir(parents=True, exist_ok=True)
+                content = ""
         else:
-            parent_path.mkdir(parents=True, exist_ok=True)
-            content = ""
+            endpoint = self.source_endpoint
+
+            def _ensure_remote_dir(sftp, path: str) -> None:
+                if path in {"", "/"}:
+                    return
+                parts: list[str] = []
+                cur = path
+                while cur and cur != "/":
+                    parts.append(cur)
+                    cur = posixpath.dirname(cur)
+                for seg in reversed(parts):
+                    try:
+                        sftp.stat(seg)
+                    except OSError:
+                        sftp.mkdir(seg)
+
+            with pooled_ssh_client(
+                host=str(endpoint.host),
+                user=str(endpoint.user),
+                port=endpoint.port or 22,
+                compress=self.apply_settings.ssh_compression,
+                timeout=10,
+            ) as client:
+                sftp = client.open_sftp()
+                try:
+                    quoted = endpoint.root.replace("'", "'\\''")
+                    _stdin, stdout, _stderr = client.exec_command(
+                        f"python3 -c \"import os; print(os.path.expanduser('{quoted}'))\""
+                    )
+                    expanded = (
+                        stdout.read().decode("utf-8", errors="replace").strip()
+                        or endpoint.root
+                    )
+                    remote_root_abs = sftp.normalize(expanded)
+                    parent_path = (
+                        remote_root_abs
+                        if parent_relpath == "."
+                        else f"{remote_root_abs.rstrip('/')}/{parent_relpath}"
+                    )
+                    _ensure_remote_dir(sftp, parent_path)
+                    ignore_path = f"{parent_path.rstrip('/')}/.dropboxignore"
+                    try:
+                        with sftp.open(ignore_path, "r") as handle:
+                            content = handle.read().decode("utf-8", errors="replace")
+                    except OSError:
+                        content = ""
+                finally:
+                    sftp.close()
 
         for line in content.splitlines():
             stripped = line.strip()
@@ -224,7 +277,38 @@ class ReviewActionsMixin:
         if content and not content.endswith("\n"):
             content += "\n"
         content += f"{rule}\n"
-        ignore_path.write_text(content, encoding="utf-8")
+        if self.source_endpoint.is_local:
+            ignore_path.write_text(content, encoding="utf-8")
+        else:
+            endpoint = self.source_endpoint
+            with pooled_ssh_client(
+                host=str(endpoint.host),
+                user=str(endpoint.user),
+                port=endpoint.port or 22,
+                compress=self.apply_settings.ssh_compression,
+                timeout=10,
+            ) as client:
+                sftp = client.open_sftp()
+                try:
+                    quoted = endpoint.root.replace("'", "'\\''")
+                    _stdin, stdout, _stderr = client.exec_command(
+                        f"python3 -c \"import os; print(os.path.expanduser('{quoted}'))\""
+                    )
+                    expanded = (
+                        stdout.read().decode("utf-8", errors="replace").strip()
+                        or endpoint.root
+                    )
+                    remote_root_abs = sftp.normalize(expanded)
+                    parent_path = (
+                        remote_root_abs
+                        if parent_relpath == "."
+                        else f"{remote_root_abs.rstrip('/')}/{parent_relpath}"
+                    )
+                    ignore_path = f"{parent_path.rstrip('/')}/.dropboxignore"
+                    with sftp.open(ignore_path, "w") as handle:
+                        handle.write(content)
+                finally:
+                    sftp.close()
         return True
 
     def action_add_to_dropboxignore(self) -> None:
@@ -292,10 +376,10 @@ class ReviewActionsMixin:
         scope_is_dir = kind == "dir"
 
         try:
-            local_records, remote_records = self._scan_subtree_records(
+            source_records, destination_records = self._scan_subtree_records(
                 scope_relpath, scope_is_dir
             )
-            scoped_diffs = compare_records(local_records, remote_records)
+            scoped_diffs = compare_records(source_records, destination_records)
             self._replace_scope_with_diffs(scope_relpath, scope_is_dir, scoped_diffs)
         except Exception as exc:  # noqa: BLE001
             self._notify_message(f"Update path failed: {exc}", severity="error")
@@ -412,8 +496,8 @@ class ReviewActionsMixin:
 
         self.push_screen(
             ApplyRunModal(
-                local_root=self.local_root,
-                remote_address=self.remote_address,
+                source_endpoint=self.source_endpoint,
+                destination_endpoint=self.destination_endpoint,
                 operations=operations,
                 apply_settings=self.apply_settings,
                 progress_event_cb=self._on_apply_progress,
@@ -486,13 +570,6 @@ class ReviewActionsMixin:
     def action_show_commands(self) -> None:
         self.push_screen(CommandsModal(), callback=self._on_command_chosen)
 
-    def _resolve_local_path(self, relpath: str) -> Path:
-        for candidate in self._candidate_relpaths(relpath):
-            candidate_path = self.local_root / candidate
-            if candidate_path.exists():
-                return candidate_path
-        return self.local_root / relpath
-
     def _read_text_lines_for_diff(
         self, file_path: Path, side_label: str
     ) -> tuple[list[str] | None, str | None]:
@@ -509,23 +586,23 @@ class ReviewActionsMixin:
         return text.splitlines(), None
 
     def _build_text_diff(
-        self, relpath: str, local_path: Path, remote_path: Path
+        self, relpath: str, source_path: Path, destination_path: Path
     ) -> str:
-        local_lines, local_error = self._read_text_lines_for_diff(local_path, "local")
-        if local_error is not None:
-            return local_error
-        remote_lines, remote_error = self._read_text_lines_for_diff(
-            remote_path, "remote"
+        source_lines, source_error = self._read_text_lines_for_diff(source_path, "left")
+        if source_error is not None:
+            return source_error
+        destination_lines, destination_error = self._read_text_lines_for_diff(
+            destination_path, "right"
         )
-        if remote_error is not None:
-            return remote_error
+        if destination_error is not None:
+            return destination_error
 
         diff_lines = list(
             difflib.unified_diff(
-                local_lines or [],
-                remote_lines or [],
-                fromfile=f"local/{relpath}",
-                tofile=f"remote/{relpath}",
+                source_lines or [],
+                destination_lines or [],
+                fromfile=f"left/{relpath}",
+                tofile=f"right/{relpath}",
                 lineterm="",
             )
         )
@@ -549,15 +626,17 @@ class ReviewActionsMixin:
             return
         if not self._has_local_copy(relpath) or not self._has_remote_copy(relpath):
             self._notify_message(
-                "Diff is available only when both local and remote files exist.",
+                "Diff is available only when both left and right files exist.",
                 severity="warning",
             )
             return
 
         try:
-            local_path = self._resolve_local_path(relpath)
-            remote_path = self._download_remote_file(relpath)
-            diff_text = self._build_text_diff(relpath, local_path, remote_path)
+            source_path = self._download_endpoint_file(self.source_endpoint, relpath)
+            destination_path = self._download_endpoint_file(
+                self.destination_endpoint, relpath
+            )
+            diff_text = self._build_text_diff(relpath, source_path, destination_path)
             self.push_screen(FileDiffModal(relpath, diff_text))
         except Exception as exc:  # noqa: BLE001
             self._notify_message(f"Diff failed: {exc}", severity="error")
@@ -568,19 +647,19 @@ class ReviewActionsMixin:
             self._notify_message("Select a file to open.", severity="warning")
             return
 
-        has_local = self._has_local_copy(relpath)
-        has_remote = self._has_remote_copy(relpath)
-        if has_local and has_remote:
+        has_source = self._has_local_copy(relpath)
+        has_destination = self._has_remote_copy(relpath)
+        if has_source and has_destination:
             self.push_screen(
                 OpenSideModal(relpath),
                 callback=lambda side: self._on_open_side_chosen(relpath, side),
             )
             return
 
-        if has_local:
+        if has_source:
             self._open_file_side(relpath, "left")
             return
-        if has_remote:
+        if has_destination:
             self._open_file_side(relpath, "right")
             return
 

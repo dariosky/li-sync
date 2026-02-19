@@ -92,19 +92,20 @@ def _is_changed(entry: FileEntry) -> bool:
 
 def _folder_label(entry: DirEntry, *, include_identical: bool = True) -> Text:
     c = entry.counts
+    only_left = c.only_local
+    only_right = c.only_remote
     parts: list[str] = []
-    if c.only_remote:
-        parts.append(f"Right {c.only_remote}")
-    if c.only_local:
-        parts.append(f"Left {c.only_local}")
+    if only_left:
+        parts.append(f"Left {only_left}")
+    if only_right:
+        parts.append(f"Right {only_right}")
     if c.different:
         parts.append(f"Conflict {c.different}")
-    if c.metadata_only:
-        parts.append(f"Metadata {c.metadata_only}")
+    metadata_total = c.metadata_only + c.uncertain
+    if metadata_total:
+        parts.append(f"Metadata {metadata_total}")
     if include_identical and c.identical:
         parts.append(f"Identical {c.identical}")
-    if c.uncertain:
-        parts.append(f"Uncertain {c.uncertain}")
     summary = " | ".join(parts) if parts else "No changes"
     return Text.assemble((entry.name, "bold"), "  ", (summary, "cyan"))
 

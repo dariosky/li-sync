@@ -1,151 +1,100 @@
-# Dropbox-like Bidirectional SSH Sync Tool - Plan
+# LimSync - Current Plan Snapshot
 
 ## Context and Constraints
-- Goal: build an interactive Python tool to sync two diverged folders over SSH in a LAN.
-- Local root: `/Users/dario.varotto/Dropbox`
-- Remote root: `ssh://dario@192.168.18.18:~/Dropbox`
-- Passwordless SSH is already configured.
-- Prior state: folders were historically synced with Dropbox, then diverged.
-- Safety: first run must be conservative; deletions are manual only.
-- Owner usernames differ across hosts (`dario.varotto` vs `dario`) and owner differences should not be treated as actionable drift.
+- Goal: interactive, safe bidirectional sync between two potentially diverged trees.
+- Endpoints are generic: both sides can be local or remote.
+- Endpoint examples (illustrative):
+  - `local:/path/to/folder`
+  - `ssh://user@host/path/to/folder`
+  - `user@host:~/path/to/folder`
+- First-run safety is strict: no destructive defaults.
+- Owner/group mismatches are informational only.
 
-## Agreed Product Decisions
-1. Engine + TUI architecture:
-- Core sync engine in Python (scan, compare, plan, apply).
-- Interactive terminal UI (tree-oriented) for review and approvals.
+## Implemented Product Decisions
+1. Endpoint model
+- CLI uses `source` and `destination` endpoint inputs.
+- Both endpoint formats are supported (typed URI + legacy remote syntax).
+- Scan/apply can run for local-local, local-remote, remote-local, and remote-remote.
 
-2. Metadata policy:
-- File content and metadata are compared separately.
-- Permission bits should be synced.
-- Owner/group mismatches are expected across hosts and should not drive sync actions.
+2. CLI surface
+- Default command runs scan (no `scan` subcommand).
+- Main invocation: `limsync --source ... --destination ...`.
+- `review` remains a subcommand.
 
-3. First-run behavior:
-- No automatic deletions.
-- Deletions require explicit user action in the review UI.
-- Bulk handling at folder level must be supported.
+3. Safety
+- Review-first workflow remains the default.
+- Apply still requires explicit confirmation in TUI.
+- Delete actions are not automatic.
 
-4. Conflict behavior:
-- No automatic conflict suffix files.
-- UI must allow inspecting/opening local and remote versions before selecting action.
+4. UI terminology
+- TUI keeps `left/right` language for actions and file sides.
+- Endpoint abstraction is internal; interaction model stays familiar.
 
-5. Exclusion behavior:
-- Do not use local xattr exclusion in sync scan path (for performance on large trees).
-- Respect `.dropboxignore` files in any subfolder (gitignore-like pattern semantics).
-- Exclude folder names:
-  - `CACHE_FOLDERS = {"__pycache__", ".pytest_cache", ".cache", ".ruff_cache"}`
-  - `EXCLUDED_FOLDERS = {"node_modules", ".tox", ".limsync"} | CACHE_FOLDERS`
-- Always exclude `.DS_Store`.
+## Current Architecture
 
-## Proposed Architecture
+### Core modules (actual package)
+- `src/limsync/endpoints.py`
+  - Parses endpoint syntax and provides canonical endpoint specs.
+  - Computes default per-endpoint state DB path and default review DB path.
+- `src/limsync/scanner_local.py`
+  - Local recursive scan with exclusions and nested `.dropboxignore`.
+- `src/limsync/scanner_remote.py` + `src/limsync/remote_helper.py`
+  - Remote scan via streamed SSH helper JSONL.
+- `src/limsync/compare.py`
+  - Content and metadata states tracked separately.
+- `src/limsync/planner_apply.py`
+  - Planner operation mapping and endpoint-aware apply execution.
+- `src/limsync/state_db.py`
+  - Single current workspace state + action overrides + UI prefs.
+- `src/limsync/review_tui.py` + `src/limsync/review_actions.py` + `src/limsync/modals.py`
+  - Interactive review, subtree operations, diff/open, apply flow.
 
-### 1) Core modules
-- `sync_core/models.py`
-  - Data classes for nodes, file signatures, diff states, planned actions.
-- `sync_core/excludes.py`
-  - xattr check (local side), `.dropboxignore` parser/evaluator, static excluded folder names.
-- `sync_core/scanner_local.py`
-  - Local recursive walk with metadata/signature collection.
-- `sync_core/scanner_remote.py`
-  - Remote scan via SSH-executed helper script returning normalized JSON records.
-- `sync_core/compare.py`
-  - Two-phase compare: cheap checks first, hash-on-demand when uncertain.
-- `sync_core/planner.py`
-  - Build action plan with explicit conflict/manual-delete markers.
-- `sync_core/apply.py`
-  - Execute approved actions over local FS and SSH/SFTP remote operations.
-- `sync_core/state_db.py`
-  - SQLite snapshot history to improve delete detection in future runs.
+### Interfaces
+- CLI:
+  - `limsync --source ... --destination ... [--state-db ...] [--open-review/--no-open-review]`
+  - `limsync review [--state-db ...]`
+- TUI:
+  - Left/right action model, scoped update, plan view, apply confirmation.
 
-### 2) Interfaces
-- CLI (`Typer`): `scan`, `review`, `apply`, `run --dry-run`.
-- TUI (`Textual`):
-  - Tree view with folder-level rollups.
-  - Filter toggles (conflicts, metadata-only, only-local, only-remote, deletes).
-  - Action assignment at file/folder level.
-  - "Open local" / "Open remote" affordances.
+### Transport
+- SSH + SFTP for remote operations.
+- Remote-to-remote apply is supported using local temp staging when needed.
 
-### 3) Transport
-- SSH for control and remote scanning via streamed helper process.
-- SFTP or SCP for file transfer operations.
-- Optional future optimization: rsync-backed transfer execution while preserving planner/UI decisions.
-
-### 4) State Persistence
-- Store local scan/diff status in `<local_root>/.limsync/state.sqlite3`.
-- Store remote scan snapshot status in `<remote_root>/.limsync/state.sqlite3`.
+## Persistence Model
+- Per-endpoint scan snapshot DB defaults:
+  - local endpoint: `<local_root>/.limsync/state.sqlite3`
+  - remote endpoint: `<remote_root>/.limsync/state.sqlite3`
+- Local review/worktree DB default:
+  - `~/.limsync/<source_slug>__<destination_slug>.sqlite3`
+- State context persists `source_endpoint` and `destination_endpoint` with compatibility for older DB rows.
 
 ## Data Model (High-level)
-- For each path:
-  - `type`: file/dir/link
-  - `content_state`: identical | different | only_local | only_remote | unknown
-  - `metadata_state`: identical | different | not_applicable
-  - `metadata_diff`: mode, mtime, xattrs subset, etc.
-  - `conflict`: boolean
-  - `recommended_action`: sync_left_to_right | sync_right_to_left | chmod_left | chmod_right | skip | manual_delete
-  - `user_action`: nullable override from review UI
+- Per path:
+  - `content_state`: `identical | different | only_local | only_remote | unknown`
+  - `metadata_state`: `identical | different | not_applicable`
+  - `metadata_diff` + detailed metadata annotations
+  - `recommended_action` and optional user override
 
-## Comparison Strategy
-1. Scan both trees with excludes applied.
-2. Fast equality check by `(type, size, mtime_ns)` where safe.
-3. Mark uncertain cases when size matches but timestamps drift.
-4. Detect metadata-only drift when metadata differs and content appears unchanged by cheap checks.
-5. Mark delete candidates as manual on first run.
+## Exclusions
+- Always excluded:
+  - `.DS_Store`
+  - `Icon\r`
+- Excluded folders:
+  - `CACHE_FOLDERS = {"__pycache__", ".pytest_cache", ".cache", ".ruff_cache"}`
+  - `EXCLUDED_FOLDERS = {"node_modules", ".tox", ".venv", ".limsync"} | CACHE_FOLDERS`
+- Nested `.dropboxignore` is respected.
+- Xattr exclusion is intentionally disabled for performance.
 
-## Review UX Requirements
-- Tree-first navigation with aggregate status counts per folder.
-- Single action can apply to full subtree.
-- Fast preview panel for selected node.
-- "Open local" and "Open remote" commands before conflict resolution.
-- Non-destructive by default until user confirms apply.
+## Testing Status and Priorities
+- Current automated status: unit tests pass (`pytest`).
+- Priorities:
+  1. Exclusion correctness (`.dropboxignore`, excluded dirs/files).
+  2. Compare correctness for content vs metadata-only drift.
+  3. Planner/apply correctness for all endpoint combinations.
+  4. Integration reliability over SSH helpers.
 
-## Execution Policy
-- Default mode: dry-run and review.
-- Apply mode requires explicit confirmation.
-- First run: deletions disabled unless explicitly chosen by the user.
-- Logs/audit trail saved for each run.
-
-## Phased Implementation Plan
-
-### Phase 1 - Foundation
-- Project scaffold (package layout, CLI entrypoint, config, logging).
-- Local scanner + static excludes + `.dropboxignore` parser.
-- Remote scanner (SSH helper) with normalized record format and remote SQLite snapshot persistence.
-
-### Phase 2 - Diff Engine
-- Implement compare states and metadata-only detection.
-- Implement planner with conservative first-run defaults.
-- Produce rich dry-run reports.
-
-### Phase 3 - Apply Engine
-- Implement upload/download/create-dir/update-perms.
-- Implement guarded delete workflow (manual-only).
-- Add run journaling and rollback-friendly logging.
-
-### Phase 4 - Interactive TUI
-- Tree browser and filters.
-- Folder-level bulk actions.
-- Conflict inspection hooks (open local/open remote).
-
-### Phase 5 - Persistence and Reliability
-- SQLite state snapshots.
-- Better rename/move heuristics (future).
-- Performance and correctness hardening.
-
-## Testing Strategy
-- Unit tests for excludes, compare logic, planner transitions.
-- Integration tests using temporary local trees + SSH test target.
-- Golden tests for `.dropboxignore` semantics.
-- Safety tests for first-run delete suppression.
-
-## Risks and Mitigations
-- Diverged history may produce many conflicts:
-  - Mitigation: tree-level bulk actions + robust filtering.
-- Metadata portability differences across OS/filesystems:
-  - Mitigation: configurable metadata policy and explicit ignore for owner mismatch.
-- Large initial scan cost:
-  - Mitigation: hash-on-demand, persisted state cache.
-
-## Success Criteria
-- Can scan both roots and produce accurate diff with excludes.
-- Clearly identifies content-vs-metadata drift.
-- Enables interactive review and subtree approvals.
-- Performs safe, auditable, user-approved synchronization over SSH.
+## Next Hardening Steps
+1. Add dedicated tests for endpoint parsing variants and default DB path behavior.
+2. Add integration coverage for remote-remote apply with larger file sets.
+3. Add migration tests for old state DB schemas.
+4. Improve docs for endpoint syntax edge cases (`ssh://.../~/path` handling).

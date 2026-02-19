@@ -110,7 +110,7 @@ def test_symlink_content_uses_normalized_target_key() -> None:
             mode=0o777,
             mtime_ns=1,
             size=3,
-            link_target="/Users/dario.varotto/Dropbox/docs/readme.md",
+            link_target="/Users/dario/Dropbox/docs/readme.md",
             link_target_key="inroot:docs/readme.md",
         )
     }

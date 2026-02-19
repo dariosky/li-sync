@@ -49,6 +49,25 @@ def test_folder_label_can_hide_identical_count() -> None:
     )
 
 
+def test_folder_label_orders_left_right_conflict_metadata_and_merges_uncertain() -> None:
+    entry = DirEntry(
+        name="docs",
+        relpath="docs",
+        counts=FolderCounts(
+            only_local=2,
+            only_remote=1,
+            different=3,
+            metadata_only=4,
+            uncertain=5,
+        ),
+    )
+
+    assert (
+        _folder_label(entry, include_identical=False).plain
+        == "docs  Left 2 | Right 1 | Conflict 3 | Metadata 9"
+    )
+
+
 def test_file_label_uses_readable_badges() -> None:
     assert _file_label(_mk_file_entry("only_local")).plain == "a.txt  [Left] -"
     assert _file_label(_mk_file_entry("only_remote")).plain == "a.txt  [Right] -"

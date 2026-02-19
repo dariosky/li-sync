@@ -4,8 +4,13 @@ This file defines project-specific operating instructions for future agentic cod
 
 ## Project Goal
 Build a Python tool to bidirectionally sync:
-- Local: `/Users/dario.varotto/Dropbox`
-- Remote: `ssh://dario@192.168.18.18:~/Dropbox`
+- Source endpoint: local or remote
+- Destination endpoint: local or remote
+
+Example endpoints (illustrative, not defaults):
+- `local:/path/to/folder`
+- `ssh://user@host/path/to/folder`
+- `user@host:~/path/to/folder`
 
 The tool must prioritize safe reconciliation of two trees that likely diverged after a long period without sync.
 
@@ -23,7 +28,7 @@ The tool must prioritize safe reconciliation of two trees that likely diverged a
 2. Metadata handling.
 - Sync permission bits.
 - Do not treat owner/group mismatch as actionable drift by default.
-  Context: usernames differ (`dario.varotto` locally, `dario` remotely).
+  Context: usernames may differ (`x` locally, `y` remotely).
 
 3. Safety defaults.
 - First run must be non-destructive.
